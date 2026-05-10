@@ -42,7 +42,7 @@ services:
       - "8001"
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
-      - ../files/extensions_config.json:/app/backend/extensions_config.json:ro
+      - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
       - ../files/deerflow-state:/app/backend/.deer-flow
     environment:
       - CI=true
