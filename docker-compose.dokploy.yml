@@ -16,9 +16,9 @@ services:
 
   gateway:
     build:
-      context: .                       # ✅ REPO ROOT
-      dockerfile: backend/Dockerfile  # ✅ relative to root
-    command: uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001
+      context: .
+      dockerfile: backend/Dockerfile
+    command: uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001
     ports:
       - "8001:8001"
     env_file:
@@ -33,9 +33,9 @@ services:
 
   langgraph:
     build:
-      context: .                       # ✅ REPO ROOT
-      dockerfile: backend/Dockerfile  # ✅ relative to root
-    command: langgraph serve --host 0.0.0.0 --port 2024
+      context: .
+      dockerfile: backend/Dockerfile
+    command: uv run langgraph serve --host 0.0.0.0 --port 2024
     ports:
       - "2024:2024"
     env_file:
@@ -51,8 +51,8 @@ services:
 
   frontend:
     build:
-      context: .                        # ✅ REPO ROOT
-      dockerfile: frontend/Dockerfile  # ✅ relative to root
+      context: .
+      dockerfile: frontend/Dockerfile
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
         - NEXT_PUBLIC_LANGGRAPH_BASE_URL=/api/langgraph
