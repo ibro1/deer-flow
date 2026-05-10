@@ -1,0 +1,74 @@
+services:
+  nginx:
+    build:
+      context: .
+      dockerfile: docker/nginx/Dockerfile
+    ports:
+      - "2026:2026"
+    depends_on:
+      - gateway
+      - langgraph
+      - frontend
+    restart: unless-stopped
+    networks:
+      - deer-flow-network
+      - dokploy-network
+
+  gateway:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - ../files/config.yaml:/app/config.yaml
+      - ../files/deerflow-state:/app/.deer-flow
+    restart: unless-stopped
+    networks:
+      - deer-flow-network
+
+  langgraph:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: langgraph up --host 0.0.0.0 --port 2024
+    ports:
+      - "2024:2024"
+    env_file:
+      - .env
+    volumes:
+      - ../files/config.yaml:/app/config.yaml
+      - ../files/deerflow-state:/app/.deer-flow
+    restart: unless-stopped
+    networks:
+      - deer-flow-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+        - NEXT_PUBLIC_LANGGRAPH_BASE_URL=${NEXT_PUBLIC_LANGGRAPH_BASE_URL:-/api/langgraph}
+        - NEXT_PUBLIC_BACKEND_BASE_URL=${NEXT_PUBLIC_BACKEND_BASE_URL:-}
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    depends_on:
+      - gateway
+    restart: unless-stopped
+    networks:
+      - deer-flow-network
+
+networks:
+  deer-flow-network:
+    driver: bridge
+  dokploy-network:
+    external: true
+
+volumes:
+  deerflow-state:
