@@ -51,7 +51,7 @@ services:
 
   frontend:
     build:
-      context: ./frontend
+      context: ./web
       dockerfile: Dockerfile
       args:
         - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
