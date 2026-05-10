@@ -3,13 +3,14 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: sh -c "cd /app/backend && PYTHONPATH=/app/backend uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001"
+    command: sh -c "cd /app/backend && uv run uvicorn src.gateway.app:app --host 0.0.0.0 --port 8001"
     expose:
       - "8001"
     env_file:
       - .env
     environment:
       - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - PYTHONPATH=/app/backend    # ✅ moved here
     volumes:
       - ../files/config.yaml:/app/config.yaml:ro
     restart: unless-stopped
@@ -20,13 +21,14 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    command: sh -c "cd /app/backend && uv run langgraph up --host 0.0.0.0 --port 2024"
+    command: sh -c "cd /app/backend && uv run langgraph up --port 2024"  # ✅ removed --host
     expose:
       - "2024"
     env_file:
       - .env
     environment:
       - DEER_FLOW_CONFIG_PATH=/app/config.yaml
+      - PYTHONPATH=/app/backend    # ✅ added here too
     volumes:
       - ../files/config.yaml:/app/config.yaml:ro
       - deerflow-state:/app/.deer-flow
