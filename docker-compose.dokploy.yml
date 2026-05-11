@@ -4,7 +4,10 @@ services:
     container_name: deer-flow-sandbox
     security_opt:
       - seccomp:unconfined
-    shm_size: "2gb"
+    shm_size: "8gb"
+    mem_limit: "16g"
+    memswap_limit: "16g"
+    cpus: "4"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
