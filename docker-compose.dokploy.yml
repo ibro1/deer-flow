@@ -37,9 +37,11 @@ services:
       - "3000"
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
-      - BETTER_AUTH_URL=${BETTER_AUTH_URL}
-      - BETTER_AUTH_TRUSTED_ORIGINS=${BETTER_AUTH_TRUSTED_ORIGINS}
+      - BETTER_AUTH_URL=https://deer.linkfa.de
+      - BETTER_AUTH_TRUSTED_ORIGINS=https://deer.linkfa.de,http://deer.linkfa.de
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - NEXT_PUBLIC_API_URL=https://deer.linkfa.de
+      - NEXT_PUBLIC_LANGGRAPH_BASE_URL=https://deer.linkfa.de/api/langgraph
     env_file:
       - .env
     restart: unless-stopped
