@@ -23,13 +23,7 @@ services:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
       - ../files/deerflow-state:/app/backend/.deer-flow
-      # ── AIO Sandbox: Docker socket ──────────────────────────
       - /var/run/docker.sock:/var/run/docker.sock
-      # ── AIO Sandbox: Persistent workspace ──────────────────
-      - /var/deer-flow/uploads:/mnt/user-data/uploads
-      - /var/deer-flow/workspace:/mnt/user-data/workspace
-      - /var/deer-flow/outputs:/mnt/user-data/outputs
-    # ── AIO Sandbox: Required security options ───────────────
     security_opt:
       - seccomp:unconfined
     shm_size: "2gb"
