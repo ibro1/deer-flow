@@ -12,12 +12,12 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Singapore
-      - WORKSPACE=/home/gem
+      - WORKSPACE=/mnt/user-data/workspace    # ← changed from /home/gem
     volumes:
-      - deerflow-state:/app/backend/.deer-flow
-      - deerflow-workspace:/home/gem/workspace
-      - deerflow-uploads:/home/gem/uploads
-      - deerflow-outputs:/home/gem/outputs
+      - deerflow-workspace:/mnt/user-data/workspace   # ← safe path, not under /home/gem
+      - deerflow-uploads:/mnt/user-data/uploads
+      - deerflow-outputs:/mnt/user-data/outputs
+      # ← removed deerflow-state (wrong container)
     restart: unless-stopped
     networks:
       - deer-flow-network
@@ -45,7 +45,7 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - deerflow-state:/app/backend/.deer-flow
+      - deerflow-state:/app/backend/.deer-flow        # ← only gateway needs this
       - deerflow-workspace:/mnt/user-data/workspace
       - deerflow-uploads:/mnt/user-data/uploads
       - deerflow-outputs:/mnt/user-data/outputs
