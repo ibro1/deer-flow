@@ -11,6 +11,7 @@ services:
       - .env
     environment:
       - CI=true
+      - UMASK=000 
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/opt/deerflow/state
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
