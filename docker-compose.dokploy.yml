@@ -12,12 +12,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Singapore
-      - WORKSPACE=/mnt/user-data/workspace    # ← changed from /home/gem
+      - WORKSPACE=/mnt/user-data/workspace
     volumes:
-      - deerflow-workspace:/mnt/user-data/workspace   # ← safe path, not under /home/gem
-      - deerflow-uploads:/mnt/user-data/uploads
-      - deerflow-outputs:/mnt/user-data/outputs
-      # ← removed deerflow-state (wrong container)
+      - /opt/deerflow/workspace:/mnt/user-data/workspace
+      - /opt/deerflow/uploads:/mnt/user-data/uploads
+      - /opt/deerflow/outputs:/mnt/user-data/outputs
     restart: unless-stopped
     networks:
       - deer-flow-network
@@ -45,11 +44,10 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - ../files/deerflow-state:/app/backend/.deer-flow  
-      - deerflow-state:/app/backend/.deer-flow        # ← only gateway needs this
-      - deerflow-workspace:/mnt/user-data/workspace
-      - deerflow-uploads:/mnt/user-data/uploads
-      - deerflow-outputs:/mnt/user-data/outputs
+      - ../files/deerflow-state:/app/backend/.deer-flow
+      - /opt/deerflow/workspace:/mnt/user-data/workspace
+      - /opt/deerflow/uploads:/mnt/user-data/uploads
+      - /opt/deerflow/outputs:/mnt/user-data/outputs
       - /var/run/docker.sock:/var/run/docker.sock
     security_opt:
       - seccomp:unconfined
@@ -95,11 +93,6 @@ services:
     networks:
       - deer-flow-network
       - dokploy-network
-
-volumes:
-  deerflow-workspace:
-  deerflow-uploads:
-  deerflow-outputs:
 
 networks:
   deer-flow-network:
