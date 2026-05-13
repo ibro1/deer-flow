@@ -42,12 +42,9 @@ services:
       - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
     volumes:
-      - /opt/deerflow/state:/opt/deerflow/state
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - /opt/deerflow/workspace:/mnt/user-data/workspace
-      - /opt/deerflow/uploads:/mnt/user-data/uploads
-      - /opt/deerflow/outputs:/mnt/user-data/outputs
+      - /opt/deerflow/state:/opt/deerflow/state
       - /var/run/docker.sock:/var/run/docker.sock
     security_opt:
       - seccomp:unconfined
