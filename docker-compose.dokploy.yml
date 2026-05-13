@@ -32,6 +32,7 @@ services:
     env_file:
       - .env
     environment:
+      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
       - CI=true
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_HOME=/opt/deerflow/state
