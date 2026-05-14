@@ -12,12 +12,11 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       - TZ=Asia/Singapore
-      - WORKSPACE=/home/gem/workspace
+      - WORKSPACE=/home/gem
     volumes:
-      # VS Code + Jupyter workspace — shared with DeerFlow
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/home/gem/workspace
-      # DeerFlow state visible inside VS Code at /home/gem/deerflow
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/home/gem/deerflow
+      # Shared workspace mounted safely outside /home/gem
+      # Access from VS Code terminal at /mnt/shared
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
     restart: unless-stopped
     networks:
       - deer-flow-network
@@ -47,10 +46,10 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      # DeerFlow state — auth + thread workspaces
+      # Persistent state — auth DB + thread workspaces — never wiped by Dokploy
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
-      # Shared workspace also visible to gateway
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/shared-workspace
+      # Shared workspace visible to gateway too
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
