@@ -11,16 +11,18 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
-      - TZ=Asia/Singapore
+      - TZ=Africa/Lagos
       - WORKSPACE=/home/gem
     volumes:
       # Shared workspace for VS Code/Jupyter and DeerFlow
       # In VS Code/Jupyter use: /mnt/shared
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
-
       # DeerFlow state visible from VS Code/Jupyter for inspection
       # In VS Code/Jupyter use: /mnt/deerflow-state
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
+    command: >
+      sh -c "ln -sf /mnt/shared /opt/jupyter/shared_workspace &&
+             /opt/gem/run.sh"   
     restart: unless-stopped
     networks:
       - deer-flow-network
