@@ -2,7 +2,7 @@ services:
   aio-sandbox:
     image: ghcr.io/agent-infra/sandbox:latest
     container_name: deer-flow-sandbox
-    command: sh -c "ln -sf /mnt/shared /opt/jupyter/shared_workspace && exec /opt/gem/run.sh"
+    entrypoint: ["/bin/sh", "-c", "ln -sf /mnt/shared /opt/jupyter/shared_workspace && exec /opt/gem/run.sh"]
     security_opt:
       - seccomp:unconfined
     shm_size: "8gb"
