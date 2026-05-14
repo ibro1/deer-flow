@@ -1,72 +1,72 @@
-services:
-  gateway:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    working_dir: /app
-    command: sh -c "umask 000 && cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
-    expose:
-      - "8001"
-    env_file:
-      - .env
-    environment:
-      - CI=true
-      - UMASK=000 
-      - DEER_FLOW_PROJECT_ROOT=/app
-      - DEER_FLOW_HOME=/opt/deerflow/state
-      - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
-      - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
-      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=http://gateway:8001/api
-      - DEER_FLOW_CHANNELS_GATEWAY_URL=http://gateway:8001
-      - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
-      - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
-    volumes:
-      - ../files/config.yaml:/app/backend/config.yaml:ro
-      - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - /opt/deerflow/state:/opt/deerflow/state
-      - /var/run/docker.sock:/var/run/docker.sock
-    security_opt:
-      - seccomp:unconfined
-    restart: unless-stopped
-    networks:
-      - deer-flow-network
+gateway:
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  working_dir: /app
+  command: sh -c "umask 000 && cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
+  expose:
+    - "8001"
+  env_file:
+    - .env
+  environment:
+    - CI=true
+    - UMASK=000
+    - DEER_FLOW_PROJECT_ROOT=/app
+    - DEER_FLOW_HOME=/opt/deerflow/state
+    - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
+    - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
+    - DEER_FLOW_CHANNELS_LANGGRAPH_URL=http://gateway:8001/api
+    - DEER_FLOW_CHANNELS_GATEWAY_URL=http://gateway:8001
+    - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
+    - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
+    - DEER_FLOW_SANDBOX_HOST=host.docker.internal   # ← THIS IS THE KEY FIX
+  volumes:
+    - ../files/config.yaml:/app/backend/config.yaml:ro
+    - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
+    - /opt/deerflow/state:/opt/deerflow/state
+    - /var/run/docker.sock:/var/run/docker.sock
+  security_opt:
+    - seccomp:unconfined
+  restart: unless-stopped
+  networks:
+    - deer-flow-network
 
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-      target: prod
-      args:
-        PNPM_STORE_PATH: /root/.local/share/pnpm/store
-        NPM_REGISTRY: ""
-    expose:
-      - "3000"
-    environment:
-      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
-      - BETTER_AUTH_URL=https://deer.linkfa.de
-      - BETTER_AUTH_TRUSTED_ORIGINS=https://deer.linkfa.de
-      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
-      - NEXT_PUBLIC_API_URL=https://deer.linkfa.de
-      - NEXT_PUBLIC_LANGGRAPH_BASE_URL=https://deer.linkfa.de/api/langgraph
-    env_file:
-      - .env
-    restart: unless-stopped
-    networks:
-      - deer-flow-network
+frontend:
+  build:
+    context: .
+    dockerfile: frontend/Dockerfile
+    target: prod
+    args:
+      PNPM_STORE_PATH: /root/.local/share/pnpm/store
+      NPM_REGISTRY: ""
+  expose:
+    - "3000"
+  environment:
+    - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
+    - BETTER_AUTH_URL=https://deer.linkfa.de
+    - BETTER_AUTH_TRUSTED_ORIGINS=https://deer.linkfa.de
+    - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+    - NEXT_PUBLIC_API_URL=https://deer.linkfa.de
+    - NEXT_PUBLIC_LANGGRAPH_BASE_URL=https://deer.linkfa.de/api/langgraph
+  env_file:
+    - .env
+  restart: unless-stopped
+  networks:
+    - deer-flow-network
 
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "2026:2026"
-    volumes:
-      - ../files/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - frontend
-      - gateway
-    restart: unless-stopped
-    networks:
-      - deer-flow-network
-      - dokploy-network
+nginx:
+  image: nginx:alpine
+  ports:
+    - "2026:2026"
+  volumes:
+    - ../files/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+  depends_on:
+    - frontend
+    - gateway
+  restart: unless-stopped
+  networks:
+    - deer-flow-network
+    - dokploy-network
 
 networks:
   deer-flow-network:
