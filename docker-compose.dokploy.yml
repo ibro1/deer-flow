@@ -14,9 +14,13 @@ services:
       - TZ=Asia/Singapore
       - WORKSPACE=/home/gem
     volumes:
-      # Shared workspace mounted safely outside /home/gem
-      # Access from VS Code terminal at /mnt/shared
+      # Shared workspace for VS Code/Jupyter and DeerFlow
+      # In VS Code/Jupyter use: /mnt/shared
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
+
+      # DeerFlow state visible from VS Code/Jupyter for inspection
+      # In VS Code/Jupyter use: /mnt/deerflow-state
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
     restart: unless-stopped
     networks:
       - deer-flow-network
@@ -35,21 +39,30 @@ services:
       - CI=true
       - UMASK=000
       - DEER_FLOW_PROJECT_ROOT=/app
+
+      # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
+
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=http://gateway:8001/api
       - DEER_FLOW_CHANNELS_GATEWAY_URL=http://gateway:8001
       - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
+
+      # Important: gateway container must reach sandbox through Docker host
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      # Persistent state — auth DB + thread workspaces — never wiped by Dokploy
+
+      # Persistent DeerFlow state/auth/thread files
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
-      # Shared workspace visible to gateway too
+
+      # Shared workspace, mounted at same path as DeerFlow config below
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
+
+      # Required so gateway can start dynamic sandbox containers
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
