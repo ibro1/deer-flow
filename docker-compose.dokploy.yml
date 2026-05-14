@@ -24,7 +24,7 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - /opt/deerflow/state:/opt/deerflow/state
+      - ../files/deerflow-state:/opt/deerflow/state
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
       - "host.docker.internal:host-gateway"
