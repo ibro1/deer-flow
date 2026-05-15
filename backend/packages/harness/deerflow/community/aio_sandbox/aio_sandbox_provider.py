@@ -18,7 +18,6 @@ import signal
 import threading
 import time
 import uuid
-from pathlib import Path
 
 try:
     import fcntl
@@ -281,10 +280,9 @@ class AioSandboxProvider(SandboxProvider):
         acp_workspace_dir = paths.host_acp_workspace_dir(thread_id, user_id=user_id)
         
         # Ensure directories exist before Docker bind mounts
-        Path(workspace_dir).mkdir(parents=True, exist_ok=True)
-        Path(uploads_dir).mkdir(parents=True, exist_ok=True)
-        Path(outputs_dir).mkdir(parents=True, exist_ok=True)
-        Path(acp_workspace_dir).mkdir(parents=True, exist_ok=True)
+        for p in [workspace_dir, uploads_dir, outputs_dir, acp_workspace_dir]:
+            os.makedirs(p, exist_ok=True)
+            logger.info(f"Verified mount path exists: {p}")
         
         return [
             (workspace_dir, f"{VIRTUAL_PATH_PREFIX}/workspace", False),
