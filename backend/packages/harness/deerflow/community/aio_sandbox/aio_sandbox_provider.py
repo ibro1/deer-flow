@@ -18,6 +18,7 @@ import signal
 import threading
 import time
 import uuid
+from pathlib import Path
 
 try:
     import fcntl
@@ -273,14 +274,23 @@ class AioSandboxProvider(SandboxProvider):
         paths = get_paths()
         user_id = get_effective_user_id()
         paths.ensure_thread_dirs(thread_id, user_id=user_id)
-
+        
+        workspace_dir = paths.host_sandbox_work_dir(thread_id, user_id=user_id)
+        uploads_dir = paths.host_sandbox_uploads_dir(thread_id, user_id=user_id)
+        outputs_dir = paths.host_sandbox_outputs_dir(thread_id, user_id=user_id)
+        acp_workspace_dir = paths.host_acp_workspace_dir(thread_id, user_id=user_id)
+        
+        # Ensure directories exist before Docker bind mounts
+        Path(workspace_dir).mkdir(parents=True, exist_ok=True)
+        Path(uploads_dir).mkdir(parents=True, exist_ok=True)
+        Path(outputs_dir).mkdir(parents=True, exist_ok=True)
+        Path(acp_workspace_dir).mkdir(parents=True, exist_ok=True)
+        
         return [
-            (paths.host_sandbox_work_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
-            (paths.host_sandbox_uploads_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
-            (paths.host_sandbox_outputs_dir(thread_id, user_id=user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
-            # ACP workspace: read-only inside the sandbox (lead agent reads results;
-            # the ACP subprocess writes from the host side, not from within the container).
-            (paths.host_acp_workspace_dir(thread_id, user_id=user_id), "/mnt/acp-workspace", True),
+            (workspace_dir, f"{VIRTUAL_PATH_PREFIX}/workspace", False),
+            (uploads_dir, f"{VIRTUAL_PATH_PREFIX}/uploads", False),
+            (outputs_dir, f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+            (acp_workspace_dir, "/mnt/acp-workspace", True),
         ]
 
     @staticmethod
