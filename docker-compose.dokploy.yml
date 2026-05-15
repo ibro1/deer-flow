@@ -41,7 +41,7 @@ services:
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_ENABLE_CUSTOM_AGENTS=true
       # Important: host path and container path must match for Docker socket bind mounts
-      - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
+      - DEER_FLOW_HOME=/app/backend/.deer-flow
 
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
@@ -55,10 +55,7 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-
-      # Persistent DeerFlow state/auth/thread files
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
-
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
       # Shared workspace, mounted at same path as DeerFlow config below
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
 
