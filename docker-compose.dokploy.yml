@@ -88,6 +88,8 @@ services:
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
       - NEXT_PUBLIC_API_URL=https://deer.linkfa.de
       - NEXT_PUBLIC_LANGGRAPH_BASE_URL=https://deer.linkfa.de/api/langgraph
+    volumes:
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/frontend-data:/app/.next
     env_file:
       - .env
     restart: unless-stopped
