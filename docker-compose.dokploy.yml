@@ -39,7 +39,7 @@ services:
       - CI=true
       - UMASK=000
       - DEER_FLOW_PROJECT_ROOT=/app
-
+      - DEER_FLOW_ENABLE_CUSTOM_AGENTS=true
       # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
 
