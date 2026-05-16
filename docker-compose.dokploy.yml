@@ -57,6 +57,7 @@ services:
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
       # Shared workspace, mounted at same path as DeerFlow config below
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
