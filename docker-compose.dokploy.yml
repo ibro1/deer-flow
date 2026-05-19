@@ -32,7 +32,14 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     working_dir: /app
-    command: sh -c "umask 000 && cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2"
+    command: >
+      sh -c "
+        printf '#!/bin/sh\nexec /usr/bin/docker \"$$@\"\n' > /app/backend/.deer-flow/docker-wrapper.sh &&
+        chmod +x /app/backend/.deer-flow/docker-wrapper.sh &&
+        umask 000 &&
+        cd backend &&
+        PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2
+      "
     expose:
       - "8001"
     env_file:
@@ -45,7 +52,7 @@ services:
       - DEER_FLOW_ENABLE_CUSTOM_AGENTS=true
       # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
-      - DEER_FLOW_SKILLS_PATH=${DEER_FLOW_SKILLS_PATH}
+      - DEER_FLOW_SKILLS_PATH=/mnt/skills
       - MCP_API_KEY=${MCP_API_KEY}
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
@@ -53,21 +60,21 @@ services:
       - DEER_FLOW_CHANNELS_GATEWAY_URL=http://gateway:8001
       - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
-
       # Important: gateway container must reach sandbox through Docker host
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
-      - /usr/bin/docker:/usr/bin/docker:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
-      # Shared workspace, mounted at same path as DeerFlow config below
+      # Shared workspace
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
-
+      # Skills directory mounted at /mnt/skills for DeerFlow agent access
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills
       # Required so gateway can start dynamic sandbox containers
       - /var/run/docker.sock:/var/run/docker.sock
+      # Host docker binary mounted for openclaude-runner skill
+      - /usr/bin/docker:/usr/bin/docker:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     security_opt:
