@@ -45,7 +45,7 @@ services:
       # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - DEER_FLOW_SKILLS_PATH=${DEER_FLOW_SKILLS_PATH}
-
+      - MCP_API_KEY=${MCP_API_KEY}
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
       - DEER_FLOW_CHANNELS_LANGGRAPH_URL=http://gateway:8001/api
