@@ -34,7 +34,7 @@ services:
     working_dir: /app
     command: >
       sh -c "
-        printf '#!/bin/sh\nexec /usr/bin/docker \"$$@\"\n' > /app/backend/.deer-flow/docker-wrapper.sh &&
+        echo 'IyEvYmluL3NoCmV4ZWMgL3Vzci9iaW4vZG9ja2VyICIkQCIK' | base64 -d > /app/backend/.deer-flow/docker-wrapper.sh &&
         chmod +x /app/backend/.deer-flow/docker-wrapper.sh &&
         umask 000 &&
         cd backend &&
