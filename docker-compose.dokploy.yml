@@ -39,7 +39,6 @@ services:
       - .env
     environment:
       - PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-      - /usr/bin/docker:/usr/bin/docker:ro
       - CI=true
       - UMASK=000
       - DEER_FLOW_PROJECT_ROOT=/app
@@ -59,6 +58,7 @@ services:
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
+      - /usr/bin/docker:/usr/bin/docker:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
