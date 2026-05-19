@@ -38,6 +38,8 @@ services:
     env_file:
       - .env
     environment:
+      - PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+      - /usr/bin/docker:/usr/bin/docker:ro
       - CI=true
       - UMASK=000
       - DEER_FLOW_PROJECT_ROOT=/app
@@ -45,7 +47,6 @@ services:
       # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - DEER_FLOW_SKILLS_PATH=${DEER_FLOW_SKILLS_PATH}
-      - PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
       - MCP_API_KEY=${MCP_API_KEY}
       - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
       - DEER_FLOW_EXTENSIONS_CONFIG_PATH=/app/backend/extensions_config.json
