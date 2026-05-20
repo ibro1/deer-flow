@@ -20,6 +20,7 @@ from app.gateway.routers import (
     mcp,
     memory,
     models,
+    openclaude,
     runs,
     skills,
     suggestions,
@@ -368,7 +369,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Stateless Runs API (stream/wait without a pre-existing thread)
     app.include_router(runs.router)
-
+    # OpenClaude API - delegate coding tasks to openclaude in sandbox
+    app.include_router(openclaude.router)
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
         """Health check endpoint.
