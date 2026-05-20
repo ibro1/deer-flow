@@ -31,7 +31,7 @@ async def _run_task(job_id: str, task: str):
     cmd = [
         "/usr/bin/docker", "exec", "-u", "gem", "-i", "deer-flow-sandbox",
         "bash", "-c",
-        f"export PATH=/home/gem/.npm-global/bin:$PATH && "
+        f"export PATH=/mnt/shared/.npm-global/bin:/home/gem/.npm-global/bin:$PATH && "
         f"export HOME=/home/gem && "
         f"export CLAUDE_CODE_USE_OPENAI=1 && "
         f"export OPENAI_BASE_URL=https://opengateway.gitlawb.com/v1/xiaomi-mimo && "
