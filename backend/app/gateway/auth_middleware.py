@@ -25,6 +25,7 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
     "/docs",
+    "/openclaude",
     "/redoc",
     "/openapi.json",
 )
