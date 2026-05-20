@@ -40,7 +40,7 @@ def should_check_csrf(request: Request) -> bool:
 
     path = request.url.path.rstrip("/")
     # Exempt /api/v1/auth/me endpoint
-    if path == "/api/v1/auth/me":
+    if path == "/api/v1/auth/me" or path.startswith("/openclaude"):
         return False
     return True
 
