@@ -19,7 +19,7 @@ services:
     volumes:
       # Shared workspace for VS Code/Jupyter and DeerFlow
       # In VS Code/Jupyter use: /mnt/shared
-      #- /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
       # DeerFlow state visible from VS Code/Jupyter for inspection
       # In VS Code/Jupyter use: /mnt/deerflow-state
