@@ -38,7 +38,7 @@ services:
         chmod +x /app/backend/.deer-flow/docker-wrapper.sh &&
         umask 000 &&
         cd backend &&
-        PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 2
+        PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1 --limit-concurrency 20
       "
     ports:
       - "172.17.0.1:8001:8001"
