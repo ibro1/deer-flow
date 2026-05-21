@@ -2,7 +2,7 @@ services:
   aio-sandbox:
     image: ghcr.io/agent-infra/sandbox:latest
     container_name: deer-flow-sandbox
-    entrypoint: ["/bin/sh", "-c", "mkdir -p /home/gem && printf 'export TERM=xterm-256color\\nexport PATH=/mnt/shared/.npm-global/bin:$PATH\\nexport NPM_CONFIG_PREFIX=/mnt/shared/.npm-global\\n' > /home/gem/.bashrc && cp /home/gem/.bashrc /home/gem/.profile && chown -R gem:gem /home/gem && ln -sf /mnt/shared /opt/jupyter/shared_workspace && exec /opt/gem/run.sh"]
+    entrypoint: ["/bin/sh", "-c", "mkdir -p /home/gem && printf 'export TERM=xterm-256color\\nexport PATH=/mnt/shared/.npm-global/bin:$PATH\\nexport NPM_CONFIG_PREFIX=/mnt/shared/.npm-global\\n' > /home/gem/.bashrc && cp /home/gem/.bashrc /home/gem/.profile && (chown -R gem:gem /home/gem 2>/dev/null || true) && ln -sf /mnt/shared /opt/jupyter/shared_workspace && exec /opt/gem/run.sh"]
     security_opt:
       - seccomp:unconfined
     shm_size: "8gb"
