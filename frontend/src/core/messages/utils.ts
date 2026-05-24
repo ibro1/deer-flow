@@ -170,6 +170,86 @@ export function getAssistantTurnUsageMessages(groups: MessageGroup[]) {
   return usageMessagesByGroupIndex;
 }
 
+type MessageMetadataLookup = (
+  message: Message,
+  index: number,
+) => { streamMetadata?: Record<string, unknown> } | undefined;
+
+export type StreamingMessageLookup = {
+  ids: ReadonlySet<string>;
+  messages: ReadonlySet<Message>;
+};
+
+export function getStreamingMessageLookup(
+  messages: Message[],
+  isStreaming: boolean,
+  getMessagesMetadata?: MessageMetadataLookup,
+): StreamingMessageLookup {
+  const streamingMessageIds = new Set<string>();
+  const streamingMessages = new Set<Message>();
+
+  if (!isStreaming) {
+    return {
+      ids: streamingMessageIds,
+      messages: streamingMessages,
+    };
+  }
+
+  messages.forEach((message, index) => {
+    if (!getMessagesMetadata?.(message, index)?.streamMetadata) {
+      return;
+    }
+
+    if (typeof message.id === "string" && message.id.length > 0) {
+      streamingMessageIds.add(message.id);
+    }
+    streamingMessages.add(message);
+  });
+
+  return {
+    ids: streamingMessageIds,
+    messages: streamingMessages,
+  };
+}
+
+export function isAssistantMessageGroupStreaming(
+  groupMessages: Message[],
+  streamingMessages: StreamingMessageLookup,
+) {
+  return groupMessages.some((message) => {
+    if (message.type !== "ai") {
+      return false;
+    }
+
+    return (
+      (typeof message.id === "string" &&
+        message.id.length > 0 &&
+        streamingMessages.ids.has(message.id)) ||
+      streamingMessages.messages.has(message)
+    );
+  });
+}
+
+export function getAssistantTurnCopyData(
+  messages: Message[],
+  { isStreaming = false }: { isStreaming?: boolean } = {},
+) {
+  if (isStreaming) {
+    return null;
+  }
+
+  return (
+    [...messages]
+      .reverse()
+      .filter((message) => message.type === "ai")
+      .map((message) => {
+        const content = extractContentFromMessage(message);
+        return content ?? extractReasoningContentFromMessage(message) ?? "";
+      })
+      .find((content) => content.length > 0) ?? null
+  );
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (
@@ -395,6 +475,50 @@ export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(/<uploaded_files>[\s\S]*?<\/uploaded_files>/g, "")
     .trim();
+}
+
+/**
+ * Tag names that backend middlewares wrap around internal payloads before
+ * letting them ride along inside LangGraph message ``content``.
+ *
+ * These markers are *not* user copy — they come from:
+ *
+ * - ``UploadsMiddleware`` → ``<uploaded_files>``
+ * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
+ *   ``<memory>`` / ``<current_date>`` inside)
+ * - ``TodoListMiddleware`` / ``LoopDetectionMiddleware`` style reminders
+ *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
+ *   the same tag vocabulary.
+ *
+ * The primary export filter is {@link isHiddenFromUIMessage}. This list is
+ * the defence-in-depth strip for any message that — by middleware bug,
+ * provider quirk, or merge-conflict regression — slips through without
+ * its ``hide_from_ui`` flag set.
+ */
+export const INTERNAL_MARKER_TAGS = [
+  "uploaded_files",
+  "system-reminder",
+  "memory",
+  "current_date",
+] as const;
+
+const INTERNAL_MARKER_RE = new RegExp(
+  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
+  "g",
+);
+
+/**
+ * Strip every known backend-injected marker from message content.
+ *
+ * Intended for the chat export path where a marker leaking through is a
+ * privacy regression. UI render paths should keep using
+ * {@link stripUploadedFilesTag} — they receive ``hide_from_ui`` messages
+ * via a separate filter and the narrower function avoids stripping content
+ * a user might legitimately type into a meta-discussion (e.g. asking the
+ * model about its own ``<memory>`` system).
+ */
+export function stripInternalMarkers(content: string): string {
+  return content.replace(INTERNAL_MARKER_RE, "").trim();
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
