@@ -63,7 +63,7 @@ services:
       - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
       # Important: gateway container must reach sandbox through Docker host
-      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - DEER_FLOW_SANDBOX_HOST=172.17.0.1
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
