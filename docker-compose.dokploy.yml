@@ -15,7 +15,6 @@ services:
       environment:
         - TZ=Africa/Lagos
         - WORKSPACE=/home/gem
-        - PATH=/mnt/shared/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
         - NPM_CONFIG_PREFIX=/mnt/shared/.npm-global
       volumes:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
