@@ -1,33 +1,29 @@
 services:
   aio-sandbox:
-    image: ghcr.io/agent-infra/sandbox:latest
-    container_name: deer-flow-sandbox
-    expose:
-      - "8080"
-    #entry
-    entrypoint: ["/bin/sh", "-c", "mkdir -p /home/gem && printf 'export TERM=xterm-256color\\nexport PATH=/mnt/shared/.npm-global/bin:$PATH\\nexport NPM_CONFIG_PREFIX=/mnt/shared/.npm-global\\n' > /home/gem/.bashrc && cp /home/gem/.bashrc /home/gem/.profile && (chown -R gem:gem /home/gem 2>/dev/null || true) && ln -sf /mnt/shared /opt/jupyter/shared_workspace && exec /opt/gem/run.sh"]
-    security_opt:
-      - seccomp:unconfined
-    shm_size: "8gb"
-    mem_limit: "16g"
-    memswap_limit: "16g"
-    cpus: "4"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    environment:
-      - TZ=Africa/Lagos
-      - WORKSPACE=/home/gem
-    volumes:
-      # Shared workspace for VS Code/Jupyter and DeerFlow
-      # In VS Code/Jupyter use: /mnt/shared
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
-      # DeerFlow state visible from VS Code/Jupyter for inspection
-      # In VS Code/Jupyter use: /mnt/deerflow-state
-      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
-    restart: unless-stopped
-    networks:
-      - deer-flow-network
+      image: ghcr.io/agent-infra/sandbox:latest
+      container_name: deer-flow-sandbox
+      expose:
+        - "8080"
+      security_opt:
+        - seccomp:unconfined
+      shm_size: "8gb"
+      mem_limit: "16g"
+      memswap_limit: "16g"
+      cpus: "4"
+      extra_hosts:
+        - "host.docker.internal:host-gateway"
+      environment:
+        - TZ=Africa/Lagos
+        - WORKSPACE=/home/gem
+        - PATH=/mnt/shared/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+        - NPM_CONFIG_PREFIX=/mnt/shared/.npm-global
+      volumes:
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
+      restart: unless-stopped
+      networks:
+        - deer-flow-network
 
   gateway:
     build:
