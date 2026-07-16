@@ -16,10 +16,15 @@ services:
         - TZ=Africa/Lagos
         - WORKSPACE=/home/gem
         - NPM_CONFIG_PREFIX=/mnt/shared/.npm-global
+        - PATH=/mnt/shared/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       volumes:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
+        # Persisted .bashrc override so NPM_CONFIG_PREFIX/PATH survive container recreation
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/gem-bashrc:/home/gem/.bashrc
+        # Persist Claude Code's auth/config across recreations
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/claude-config:/home/gem/.claude
       restart: unless-stopped
       networks:
         - deer-flow-network
