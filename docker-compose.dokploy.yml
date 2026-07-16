@@ -20,6 +20,7 @@ services:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/run-patched.sh:/opt/gem/run.sh
       restart: unless-stopped
       networks:
         - deer-flow-network
