@@ -16,15 +16,10 @@ services:
         - TZ=Africa/Lagos
         - WORKSPACE=/home/gem
         - NPM_CONFIG_PREFIX=/mnt/shared/.npm-global
-        - PATH=/mnt/shared/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
       volumes:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
-        # Persisted .bashrc override so NPM_CONFIG_PREFIX/PATH survive container recreation
-        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/gem-bashrc:/home/gem/.bashrc
-        # Persist Claude Code's auth/config across recreations
-        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/claude-config:/home/gem/.claude
       restart: unless-stopped
       networks:
         - deer-flow-network
@@ -54,7 +49,6 @@ services:
       - UMASK=000
       - DEER_FLOW_PROJECT_ROOT=/app
       - DEER_FLOW_ENABLE_CUSTOM_AGENTS=true
-      # Important: host path and container path must match for Docker socket bind mounts
       - DEER_FLOW_HOME=/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - DEER_FLOW_SKILLS_PATH=/mnt/skills
       - MCP_API_KEY=${MCP_API_KEY}
@@ -64,7 +58,6 @@ services:
       - DEER_FLOW_CHANNELS_GATEWAY_URL=http://gateway:8001
       - GATEWAY_CORS_ORIGINS=https://deer.linkfa.de
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
-      # Important: gateway container must reach sandbox through Docker host
       - DEER_FLOW_SANDBOX_HOST=172.17.0.1
       - DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0
     volumes:
@@ -72,13 +65,9 @@ services:
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
-      # Shared workspace
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
-      # Skills directory mounted at /mnt/skills for DeerFlow agent access
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills
-      # Required so gateway can start dynamic sandbox containers
       - /var/run/docker.sock:/var/run/docker.sock
-      # Host docker binary mounted for openclaude-runner skill
       - /usr/bin/docker:/usr/bin/docker:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
