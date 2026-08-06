@@ -309,7 +309,13 @@ async def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"message": f"invalid JSON body: {exc}", "type": "invalid_request"}},
+        )
     model = body.get("model") or DEFAULT_MODEL
     messages = body.get("messages", [])
     stream = bool(body.get("stream", False))
