@@ -232,25 +232,6 @@ BUILTIN_TOOLS = [
 ]
 
 
-async def _deny_native_tool_with_hint(tool_name, tool_input, context):
-    """can_use_tool callback: instead of a bare SDK-level deny (which the
-    model can only report to the user as a dead-end error), return a deny
-    with a corrective hint pointing back at the JSON tool_call protocol so
-    the model can self-correct within the same run instead of failing.
-    """
-    logger.info("Denied native tool attempt: %s(%r)", tool_name, tool_input)
-    return {
-        "behavior": "deny",
-        "message": (
-            f"'{tool_name}' is not available in this environment. "
-            "Do not retry it or any other native tool. If you need to take "
-            "an action, use the JSON ```tool_call``` protocol described in "
-            "your system prompt with one of the tools listed under "
-            "'Available tools'."
-        ),
-    }
-
-
 async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
     opts = dict(
         model=model,
@@ -258,7 +239,6 @@ async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
         max_turns=MAX_TURNS,
         allowed_tools=[],
         disallowed_tools=BUILTIN_TOOLS,
-        can_use_tool=_deny_native_tool_with_hint,
     )
     if thinking_budget:
         opts["max_thinking_tokens"] = thinking_budget
@@ -269,13 +249,32 @@ async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
 
     chunks: list[str] = []
     result_text: str | None = None
-    async for message in query(prompt=prompt_stream(), options=options):
-        if isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock):
-                    chunks.append(block.text)
-        elif isinstance(message, ResultMessage):
-            result_text = getattr(message, "result", None)
+    try:
+        async for message in query(prompt=prompt_stream(), options=options):
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock):
+                        chunks.append(block.text)
+            elif isinstance(message, ResultMessage):
+                result_text = getattr(message, "result", None)
+    except Exception as exc:
+        # Known claude-agent-sdk issue: a disallowed native tool attempt (or
+        # certain other API-level failures) can hard-abort the session with
+        # is_error=true and an empty errors[] list, which the SDK then
+        # mislabels as "Claude Code returned an error result: success" -
+        # discarding the actual reason. Rather than 500ing the whole request
+        # (which DeerFlow surfaces to the end user as a broken bot), degrade
+        # to a normal assistant message so the caller's agent loop can react
+        # and retry via the JSON tool_call protocol instead of dead-ending.
+        msg = str(exc)
+        if "returned an error result" in msg:
+            logger.warning("Claude Code session aborted (likely a blocked native tool attempt): %s", msg)
+            return (
+                "I don't have direct access to that tool in this environment. "
+                "I'll use the JSON tool_call protocol instead if one of the "
+                "listed tools fits what's needed."
+            )
+        raise
     return "".join(chunks) or (result_text or "")
 
 
