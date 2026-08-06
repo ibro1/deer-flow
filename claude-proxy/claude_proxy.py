@@ -16,6 +16,7 @@ Run:  uvicorn claude_proxy:app --host 0.0.0.0 --port 8082
 
 import base64
 import json
+import logging
 import re
 import time
 import uuid
@@ -32,6 +33,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 app = FastAPI()
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("claude-proxy")
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 MAX_TURNS = 6
@@ -99,40 +103,64 @@ def _tools_to_system_suffix(tools: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _coerce_text(content) -> str:
+    """Content may be a string, a list of parts, or None. Always return a string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        bits = []
+        for p in content:
+            if isinstance(p, dict) and p.get("type") == "text":
+                bits.append(p.get("text", ""))
+            elif isinstance(p, str):
+                bits.append(p)
+        return "\n".join(bits)
+    return str(content)
+
+
 async def messages_to_blocks(messages: list[dict]) -> tuple[str | None, list[dict]]:
     """Flatten OpenAI chat history (incl. assistant tool_calls and tool results)
-    into (system_prompt, content blocks for one user turn)."""
+    into (system_prompt, content blocks for one user turn). Defensive against
+    malformed tool_call arguments and non-string content."""
     system_parts: list[str] = []
     blocks: list[dict] = []
     transcript: list[str] = []
 
     for m in messages:
+        if not isinstance(m, dict):
+            continue
         role = m.get("role", "user")
         content = m.get("content", "")
 
         if role == "system":
-            if isinstance(content, list):
-                content = "\n".join(
-                    p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-                )
-            system_parts.append(content)
+            system_parts.append(_coerce_text(content))
             continue
 
         if role == "tool":
             transcript.append(
-                f"[Tool result for call {m.get('tool_call_id', '?')}]\n{content}"
+                f"[Tool result for call {m.get('tool_call_id', '?')}]\n{_coerce_text(content)}"
             )
             continue
 
         if role == "assistant":
             parts = []
-            if content:
-                parts.append(str(content))
+            text = _coerce_text(content)
+            if text:
+                parts.append(text)
             for tc in m.get("tool_calls") or []:
-                fn = tc.get("function", {})
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function", {}) or {}
+                raw_args = fn.get("arguments")
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                except (json.JSONDecodeError, TypeError):
+                    args = {"_raw": raw_args}
                 parts.append(
                     "```tool_call\n"
-                    + json.dumps({"name": fn.get("name"), "arguments": json.loads(fn.get("arguments") or "{}")})
+                    + json.dumps({"name": fn.get("name"), "arguments": args})
                     + "\n```"
                 )
             if parts:
@@ -154,11 +182,11 @@ async def messages_to_blocks(messages: list[dict]) -> tuple[str | None, list[dic
             if text_bits:
                 transcript.append("[User]\n" + "\n".join(text_bits))
         else:
-            transcript.append(f"[User]\n{content}")
+            transcript.append(f"[User]\n{_coerce_text(content)}")
 
     if transcript:
         blocks.insert(0, {"type": "text", "text": "\n\n".join(transcript)})
-    system_prompt = "\n\n".join(system_parts) or None
+    system_prompt = "\n\n".join(p for p in system_parts if p) or None
     return system_prompt, blocks
 
 
@@ -323,10 +351,13 @@ async def chat_completions(request: Request):
 
     system_prompt, blocks = await messages_to_blocks(messages)
     if not blocks:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"message": "no usable content in messages", "type": "invalid_request"}},
-        )
+        # Nothing parseable — return an empty-but-valid completion rather than erroring,
+        # so secondary callers (e.g. memory updates) don't break the run.
+        logger.warning("empty blocks for request; returning empty completion")
+        empty = openai_response(model, "", None)
+        if stream:
+            return StreamingResponse(sse_chunks(model, "", None), media_type="text/event-stream")
+        return JSONResponse(content=empty)
     if tools:
         system_prompt = (system_prompt or "") + "\n\n" + _tools_to_system_suffix(tools)
     thinking_budget = extract_thinking_budget(body)
@@ -334,6 +365,7 @@ async def chat_completions(request: Request):
     try:
         raw = await run_claude(model, system_prompt, blocks, thinking_budget)
     except Exception as exc:
+        logger.exception("run_claude failed")
         return JSONResponse(
             status_code=500,
             content={"error": {"message": f"claude-agent-sdk error: {exc}", "type": "proxy_error"}},
