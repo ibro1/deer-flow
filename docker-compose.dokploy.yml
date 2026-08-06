@@ -125,3 +125,9 @@ networks:
     driver: bridge
   dokploy-network:
     external: true
+
+claude-proxy:
+  build: ./claude-proxy
+  restart: unless-stopped
+  networks:
+    - default
