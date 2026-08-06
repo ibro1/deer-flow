@@ -174,8 +174,20 @@ def extract_thinking_budget(body: dict) -> int | None:
 
 # ── model call ──────────────────────────────────────────────────────────────
 
+BUILTIN_TOOLS = [
+    "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+    "Glob", "Grep", "WebSearch", "WebFetch", "Task", "TodoWrite", "KillShell",
+]
+
+
 async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
-    opts = dict(model=model, system_prompt=system_prompt, max_turns=MAX_TURNS, allowed_tools=[])
+    opts = dict(
+        model=model,
+        system_prompt=system_prompt,
+        max_turns=MAX_TURNS,
+        allowed_tools=[],
+        disallowed_tools=BUILTIN_TOOLS,
+    )
     if thinking_budget:
         opts["max_thinking_tokens"] = thinking_budget
     options = ClaudeAgentOptions(**opts)
