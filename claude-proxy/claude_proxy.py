@@ -1,8 +1,23 @@
 """
-claude_proxy.py  (v3)
+claude_proxy.py  (v4)
 OpenAI-compatible /v1/chat/completions proxy backed by the Claude Agent SDK.
 
-v3 fixes/adds:
+v4 fixes/adds:
+  - TOOL_PROTOCOL now explicitly tells the model that its native built-in
+    tools (Bash, Read, Glob, Grep, LS, etc.) are disabled in this environment
+    and must not be attempted, even though DeerFlow's own emulated tool
+    schema may include similarly-named tools (bash, glob, grep, ls). Without
+    this, the bundled Claude Code CLI defaults to its trained instinct of
+    calling its own native tools directly, gets denied by disallowed_tools,
+    and reports the denial back as a user-visible "tool access error."
+  - can_use_tool callback added: instead of a bare SDK-level deny (which
+    surfaces as a dead-end error the model just reports to the user), denied
+    native tool calls now get a corrective hint pointing the model back at
+    the JSON tool_call protocol, so the model can self-correct mid-run.
+  - MAX_TURNS raised 6 -> 12 to give headroom for the occasional stray
+    native-tool attempt + retry without exhausting the turn budget.
+
+v3 fixes/adds (carried forward):
   - max_turns raised (thinking + answer no longer exhausts the session).
   - Function-calling emulation: OpenAI `tools` schemas are injected into the
     prompt; when Claude wants a tool, it emits a TOOL_CALL JSON block which is
@@ -38,7 +53,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("claude-proxy")
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
-MAX_TURNS = 6
+MAX_TURNS = 12
 EFFORT_BUDGETS = {"low": 4_000, "medium": 12_000, "high": 32_000}
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
@@ -46,6 +61,13 @@ TOOL_CALL_RE = re.compile(r"```tool_call\s*\n(.*?)\n```", re.DOTALL)
 
 TOOL_PROTOCOL = """
 # Tool calling protocol
+
+Your normal built-in tools — Bash, Read, Write, Edit, MultiEdit, NotebookEdit,
+Glob, Grep, LS, WebSearch, WebFetch, Task, TodoWrite, KillShell — are DISABLED
+in this environment and calling any of them will always fail with a
+permission error. Do NOT attempt them, even though some of the tools listed
+below have similar names or purposes (e.g. "bash", "glob", "grep") — those
+are a SEPARATE system you can only reach through the JSON protocol below.
 
 You have access to the tools listed below (JSON Schema). You CANNOT execute
 them and you CANNOT see their results until the next message. To call a tool,
@@ -206,8 +228,27 @@ def extract_thinking_budget(body: dict) -> int | None:
 
 BUILTIN_TOOLS = [
     "Bash", "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
-    "Glob", "Grep", "WebSearch", "WebFetch", "Task", "TodoWrite", "KillShell",
+    "Glob", "Grep", "LS", "WebSearch", "WebFetch", "Task", "TodoWrite", "KillShell",
 ]
+
+
+async def _deny_native_tool_with_hint(tool_name, tool_input, context):
+    """can_use_tool callback: instead of a bare SDK-level deny (which the
+    model can only report to the user as a dead-end error), return a deny
+    with a corrective hint pointing back at the JSON tool_call protocol so
+    the model can self-correct within the same run instead of failing.
+    """
+    logger.info("Denied native tool attempt: %s(%r)", tool_name, tool_input)
+    return {
+        "behavior": "deny",
+        "message": (
+            f"'{tool_name}' is not available in this environment. "
+            "Do not retry it or any other native tool. If you need to take "
+            "an action, use the JSON ```tool_call``` protocol described in "
+            "your system prompt with one of the tools listed under "
+            "'Available tools'."
+        ),
+    }
 
 
 async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
@@ -217,6 +258,7 @@ async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
         max_turns=MAX_TURNS,
         allowed_tools=[],
         disallowed_tools=BUILTIN_TOOLS,
+        can_use_tool=_deny_native_tool_with_hint,
     )
     if thinking_budget:
         opts["max_thinking_tokens"] = thinking_budget
