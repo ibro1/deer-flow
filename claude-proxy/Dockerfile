@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && npm install -g @anthropic-ai/claude-code \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir claude-agent-sdk fastapi uvicorn
+RUN pip install --no-cache-dir claude-agent-sdk fastapi uvicorn httpx
 
 WORKDIR /app
 # Build context is the repo root, so the path includes the folder name
