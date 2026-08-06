@@ -61,6 +61,7 @@ services:
       - AUTH_JWT_SECRET=${BETTER_AUTH_SECRET}
       - DEER_FLOW_SANDBOX_HOST=172.17.0.1
       - DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
     volumes:
       - ../files/config.yaml:/app/backend/config.yaml:ro
       - ../files/extensions_config.json.fix:/app/backend/extensions_config.json:ro
@@ -77,18 +78,6 @@ services:
     depends_on:
       - aio-sandbox
     restart: unless-stopped
-    networks:
-      - deer-flow-network
-
-  claude-proxy:
-    build:
-      context: .
-      dockerfile: claude-proxy/Dockerfile
-    restart: unless-stopped
-    environment:
-      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
-    expose:
-      - "8082"
     networks:
       - deer-flow-network
 
