@@ -43,18 +43,20 @@ TOOL_CALL_RE = re.compile(r"```tool_call\s*\n(.*?)\n```", re.DOTALL)
 TOOL_PROTOCOL = """
 # Tool calling protocol
 
-You have access to the tools listed below (JSON Schema). You cannot execute
-them yourself. To call a tool, end your reply with exactly one fenced block:
+You have access to the tools listed below (JSON Schema). You CANNOT execute
+them and you CANNOT see their results until the next message. To call a tool,
+end your reply with exactly one fenced block:
 
 ```tool_call
 {"name": "<tool_name>", "arguments": { ... }}
 ```
 
-Rules:
-- At most ONE tool_call block per reply, always at the very end.
-- "arguments" must match the tool's parameter schema.
+STRICT rules:
+- The tool_call block must be the LAST thing in your reply. Write nothing after it.
+- NEVER write, predict, imagine, or summarize a tool's output yourself.
+- NEVER write text beginning with "[Tool result" — only the system writes that.
+- At most ONE tool_call block per reply.
 - If no tool is needed, reply normally with no tool_call block.
-- After a tool result arrives (shown as [Tool result ...]), continue the task.
 
 ## Available tools
 """
@@ -209,8 +211,17 @@ async def run_claude(model, system_prompt, blocks, thinking_budget) -> str:
 
 # ── response shaping ────────────────────────────────────────────────────────
 
+FAKE_RESULT_RE = re.compile(r"^\s*\[Tool result.*?\]\s*$", re.MULTILINE)
+
+
 def parse_tool_call(text: str) -> tuple[str, list[dict] | None]:
-    """Split Claude's reply into (plain_text, openai_tool_calls|None)."""
+    """Split Claude's reply into (plain_text, openai_tool_calls|None).
+
+    Defensive sanitization: when a tool_call is present, keep only the text
+    BEFORE the block (protocol says the block must be last), and strip any
+    fabricated "[Tool result ...]" lines plus the paragraphs that follow
+    them, so invented results can never reach the agent as if real.
+    """
     match = TOOL_CALL_RE.search(text)
     if not match:
         return text, None
@@ -220,7 +231,12 @@ def parse_tool_call(text: str) -> tuple[str, list[dict] | None]:
         arguments = payload.get("arguments", {})
     except (json.JSONDecodeError, KeyError):
         return text, None
-    plain = TOOL_CALL_RE.sub("", text).strip()
+
+    plain = text[: match.start()].strip()
+    fake = FAKE_RESULT_RE.search(plain)
+    if fake:
+        plain = plain[: fake.start()].strip()
+
     tool_calls = [
         {
             "id": f"call_{uuid.uuid4().hex[:24]}",
