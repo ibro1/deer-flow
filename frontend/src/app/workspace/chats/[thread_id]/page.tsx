@@ -289,9 +289,11 @@ export default function ChatPage() {
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
                 <ThreadTitle threadId={threadId} thread={thread} />
               </div>
-              <div className="flex shrink-0 items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1 sm:gap-2">
                 {!isNewThread && !isMock && (
-                  <ThreadScheduledTasksLink threadId={threadId} />
+                  <span className="hidden sm:block">
+                    <ThreadScheduledTasksLink threadId={threadId} />
+                  </span>
                 )}
                 {tokenUsageEnabled ? (
                   <TokenUsageIndicator
@@ -311,7 +313,9 @@ export default function ChatPage() {
                 )}
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
-                <ExportTrigger threadId={threadId} />
+                <span className="hidden sm:block">
+                  <ExportTrigger threadId={threadId} />
+                </span>
                 <ArtifactTrigger />
               </div>
             </header>

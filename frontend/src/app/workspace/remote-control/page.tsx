@@ -6,7 +6,13 @@
  * `deer-remote` CLI. See `docs/remote-control.md`.
  */
 
-import { CircleIcon, SendIcon, SquareTerminal, WrenchIcon } from "lucide-react";
+import {
+  ChevronLeftIcon,
+  CircleIcon,
+  SendIcon,
+  SquareTerminal,
+  WrenchIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -142,24 +148,37 @@ export default function RemoteControlPage() {
       <WorkspaceBody className="items-stretch">
         <div className="flex min-h-0 w-full flex-1">
           <SessionList
+            className={cn(selected && "hidden sm:flex")}
             sessions={sessions}
             selectedId={selectedId}
             onSelect={setSelectedId}
           />
-          <div className="flex min-w-0 flex-1 flex-col">
+          <div
+            className={cn(
+              "min-w-0 flex-1 flex-col",
+              selected ? "flex" : "hidden sm:flex",
+            )}
+          >
             {selected ? (
               <>
-                <div className="flex items-center gap-2 border-b px-4 py-2">
+                <div className="flex min-w-0 items-center gap-2 border-b px-2 py-2 sm:px-4">
+                  <button
+                    onClick={() => setSelectedId(null)}
+                    className="hover:bg-accent rounded p-1 sm:hidden"
+                    aria-label="Back to sessions"
+                  >
+                    <ChevronLeftIcon className="size-4" />
+                  </button>
                   <CircleIcon
                     className={cn(
-                      "size-2.5 fill-current",
+                      "size-2.5 shrink-0 fill-current",
                       selected.connected
                         ? "text-green-500"
                         : "text-muted-foreground",
                     )}
                   />
-                  <span className="font-medium">{selected.name}</span>
-                  <span className="text-muted-foreground truncate text-xs">
+                  <span className="shrink-0 font-medium">{selected.name}</span>
+                  <span className="text-muted-foreground hidden min-w-0 truncate text-xs sm:inline">
                     {selected.agent} · {selected.cwd} · {selected.host}
                   </span>
                   {!wsConnected && (
@@ -203,13 +222,20 @@ function SessionList({
   sessions,
   selectedId,
   onSelect,
+  className,
 }: {
   sessions: RemoteSession[];
   selectedId: string | null;
   onSelect: (id: string) => void;
+  className?: string;
 }) {
   return (
-    <div className="flex w-72 shrink-0 flex-col overflow-y-auto border-r">
+    <div
+      className={cn(
+        "flex w-full shrink-0 flex-col overflow-y-auto sm:w-72 sm:border-r",
+        className,
+      )}
+    >
       {sessions.length === 0 && (
         <div className="text-muted-foreground p-4 text-sm">
           No sessions yet.

@@ -298,7 +298,9 @@ export default function AgentChatPage() {
                   <ContextUsageBadge contextUsage={contextUsage} />
                 )}
                 <SidecarTrigger />
-                <ExportTrigger threadId={threadId} />
+                <span className="hidden sm:block">
+                  <ExportTrigger threadId={threadId} />
+                </span>
                 <ArtifactTrigger />
               </div>
             </header>

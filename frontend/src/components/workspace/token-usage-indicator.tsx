@@ -86,7 +86,7 @@ export function TokenUsageIndicator({
           )}
         >
           <CoinsIcon size={14} />
-          <span>{t.tokenUsage.label}</span>
+          <span className="hidden sm:inline">{t.tokenUsage.label}</span>
           <span className="font-mono">
             {preferences.headerTotal
               ? usage
