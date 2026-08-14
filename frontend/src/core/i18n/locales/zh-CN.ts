@@ -285,6 +285,7 @@ export const zhCN: Translations = {
     demoChats: "演示对话",
     agents: "智能体",
     scheduledTasks: "定时任务",
+    remoteControl: "远程控制",
     agentsDisabledTooltip: "功能未启用",
   },
 

@@ -301,6 +301,7 @@ export const enUS: Translations = {
     demoChats: "Demo chats",
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
+    remoteControl: "Remote control",
     agentsDisabledTooltip: "Feature not enabled",
   },
 

@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""deer-remote — bridge a terminal coding agent into DeerFlow Remote Control.
+
+Usage:
+  deer-remote claude [--name NAME] [-- <extra claude args>]
+      Structured mode: runs Claude Code with bidirectional stream-json.
+      Full message/tool/result rendering in the web UI. Terminal stays
+      interactive (type a line = send a user turn); remote messages from
+      the web UI are injected as user turns.
+
+  deer-remote pty [--name NAME] -- <command...>
+      Universal mode: runs ANY interactive CLI agent (opencode, openclaude,
+      antigravity, aider, ...) under a PTY. The terminal works exactly as
+      normal; output is mirrored live to the web UI and remote messages are
+      typed into the program's stdin.
+
+Env:
+  DEER_REMOTE_URL     e.g. https://remote.example.com  (required)
+  DEER_REMOTE_TOKEN   shared token (must match server RC_TOKEN)
+  DEER_REMOTE_SESSION optional fixed session id (resume/append)
+"""
+
+import argparse
+import base64
+import fcntl
+import json
+import os
+import pty
+import queue
+import select
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import termios
+import threading
+import time
+import tty as tty_mod
+
+try:
+    import websocket  # websocket-client
+except ImportError:
+    sys.exit("deer-remote: pip install websocket-client")
+
+BOLD, DIM, RESET, CYAN = "\033[1m", "\033[2m", "\033[0m", "\033[36m"
+
+
+class Relay:
+    """Resilient WS connection to the relay server with an outbound queue."""
+
+    def __init__(self, url: str, token: str, hello: dict, on_user_message):
+        ws_url = url.rstrip("/").replace("http://", "ws://").replace("https://", "wss://")
+        # DEER_REMOTE_URL is the DeerFlow origin (e.g. https://deerflow.example.com);
+        # the relay lives inside the gateway under /api/remote-control.
+        if "/api/remote-control" not in ws_url:
+            ws_url = f"{ws_url}/api/remote-control"
+        self.url = f"{ws_url}/ws/agent?token={token}"
+        self.hello = hello
+        self.on_user_message = on_user_message
+        self.q: "queue.Queue[dict]" = queue.Queue(maxsize=10000)
+        self.session_id = hello.get("session_id")
+        self.ready = threading.Event()
+        self.stop = False
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def send(self, payload: dict):
+        try:
+            self.q.put_nowait(payload)
+        except queue.Full:
+            pass  # drop under backpressure rather than stall the agent
+
+    def _run(self):
+        backoff = 1
+        while not self.stop:
+            try:
+                ws = websocket.create_connection(self.url, timeout=10)
+                hello = dict(self.hello)
+                if self.session_id:
+                    hello["session_id"] = self.session_id
+                ws.send(json.dumps(hello))
+                ws.settimeout(0.25)
+                # wait for ready
+                deadline = time.time() + 10
+                while time.time() < deadline:
+                    try:
+                        m = json.loads(ws.recv())
+                        if m.get("type") == "ready":
+                            self.session_id = m["session_id"]
+                            self.ready.set()
+                            break
+                    except websocket.WebSocketTimeoutException:
+                        continue
+                backoff = 1
+                last_ping = time.time()
+                while not self.stop:
+                    # flush outbound
+                    try:
+                        while True:
+                            item = self.q.get_nowait()
+                            ws.send(json.dumps(item))
+                    except queue.Empty:
+                        pass
+                    # inbound
+                    try:
+                        m = json.loads(ws.recv())
+                        if m.get("type") == "user_message":
+                            self.on_user_message(m.get("text", ""))
+                    except websocket.WebSocketTimeoutException:
+                        pass
+                    if time.time() - last_ping > 25:
+                        ws.send(json.dumps({"type": "ping"}))
+                        last_ping = time.time()
+            except Exception:
+                if self.stop:
+                    return
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 15)
+
+
+def make_hello(agent: str, name: str) -> dict:
+    return {
+        "type": "hello",
+        "agent": agent,
+        "name": name,
+        "cwd": os.getcwd(),
+        "host": socket.gethostname(),
+        "session_id": os.environ.get("DEER_REMOTE_SESSION"),
+    }
+
+
+def banner(relay: Relay, url: str):
+    relay.ready.wait(timeout=10)
+    sid = relay.session_id or "?"
+    print(f"{BOLD}{CYAN}🦌 deer-remote{RESET} session {BOLD}{sid}{RESET}")
+    base = url.rstrip("/").removesuffix("/api/remote-control")
+    print(f"{DIM}   watch/control: {base}/workspace/remote-control{RESET}\n")
+
+
+# ------------------------------------------------------------- claude mode
+def run_claude(args, url, token):
+    name = args.name or f"claude:{os.path.basename(os.getcwd())}"
+    cmd = [
+        "claude", "-p", "--verbose",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+    ] + (args.rest or [])
+    proc = subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=sys.stderr, text=True, bufsize=1,
+    )
+    lock = threading.Lock()
+
+    def send_user_turn(text: str, origin: str):
+        msg = {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        }
+        with lock:
+            try:
+                proc.stdin.write(json.dumps(msg) + "\n")
+                proc.stdin.flush()
+            except Exception:
+                return
+        if origin == "remote":
+            print(f"\n{CYAN}[remote]{RESET} {text}")
+        else:
+            relay.send({"type": "local_user_message", "data": {"text": text}})
+
+    relay = Relay(url, token, make_hello("claude-code", name),
+                  lambda t: send_user_turn(t, "remote"))
+    banner(relay, url)
+
+    def read_stdout():
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            relay.send({"type": "agent_event", "data": ev})
+            render_local(ev)
+        os._exit(proc.wait() or 0)
+
+    def render_local(ev):
+        t = ev.get("type")
+        if t == "assistant":
+            for b in ev.get("message", {}).get("content", []):
+                if b.get("type") == "text":
+                    print(f"\n{b['text']}")
+                elif b.get("type") == "tool_use":
+                    print(f"{DIM}  🔧 {b.get('name')}{RESET}")
+        elif t == "result":
+            cost = ev.get("total_cost_usd") or 0
+            print(f"{DIM}✔ done · ${cost:.4f}{RESET}")
+
+    threading.Thread(target=read_stdout, daemon=True).start()
+
+    try:
+        for line in sys.stdin:
+            text = line.strip()
+            if not text:
+                continue
+            if text in ("/quit", "/exit"):
+                break
+            send_user_turn(text, "local")
+    except KeyboardInterrupt:
+        pass
+    relay.stop = True
+    try:
+        proc.stdin.close()
+    except Exception:
+        pass
+    proc.wait()
+
+
+# ---------------------------------------------------------------- pty mode
+def run_pty(args, url, token):
+    if not args.rest:
+        sys.exit("deer-remote pty: give a command after `--`, e.g. deer-remote pty -- opencode")
+    name = args.name or f"{os.path.basename(args.rest[0])}:{os.path.basename(os.getcwd())}"
+
+    master, slave = pty.openpty()
+    # propagate window size
+    def set_winsz(*_):
+        try:
+            sz = struct.pack("HHHH", *os.get_terminal_size()[::-1], 0, 0)
+            fcntl.ioctl(master, termios.TIOCSWINSZ, sz)
+        except Exception:
+            pass
+    set_winsz()
+    signal.signal(signal.SIGWINCH, set_winsz)
+
+    proc = subprocess.Popen(
+        args.rest, stdin=slave, stdout=slave, stderr=slave,
+        preexec_fn=os.setsid, close_fds=True,
+    )
+    os.close(slave)
+
+    def inject(text: str):
+        try:
+            os.write(master, text.encode() + b"\r")
+        except OSError:
+            pass
+
+    relay = Relay(url, token, make_hello(os.path.basename(args.rest[0]), name), inject)
+    banner(relay, url)
+
+    stdin_fd = sys.stdin.fileno()
+    have_tty = os.isatty(stdin_fd)
+    old_attrs = termios.tcgetattr(stdin_fd) if have_tty else None
+    if have_tty:
+        tty_mod.setraw(stdin_fd)
+    try:
+        while proc.poll() is None:
+            rl, _, _ = select.select([master, stdin_fd] if have_tty else [master], [], [], 0.5)
+            if master in rl:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    break
+                if not data:
+                    break
+                os.write(sys.stdout.fileno(), data)
+                relay.send({"type": "tty", "data": {"b64": base64.b64encode(data).decode()}})
+            if have_tty and stdin_fd in rl:
+                data = os.read(stdin_fd, 65536)
+                if not data:
+                    break
+                os.write(master, data)
+    finally:
+        if have_tty and old_attrs:
+            termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_attrs)
+        relay.stop = True
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    sys.exit(proc.returncode or 0)
+
+
+# ---------------------------------------------------------------------- cli
+def main():
+    ap = argparse.ArgumentParser(prog="deer-remote", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("mode", choices=["claude", "pty"])
+    ap.add_argument("--name", help="session display name")
+    argv = sys.argv[1:]
+    rest = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, rest = argv[:i], argv[i + 1:]
+    args = ap.parse_args(argv)
+    args.rest = rest
+
+    url = os.environ.get("DEER_REMOTE_URL", "")
+    token = os.environ.get("DEER_REMOTE_TOKEN", "")
+    if not url:
+        sys.exit("deer-remote: set DEER_REMOTE_URL (and DEER_REMOTE_TOKEN)")
+    if args.mode == "claude":
+        if not shutil.which("claude"):
+            sys.exit("deer-remote: `claude` not found on PATH")
+        run_claude(args, url, token)
+    else:
+        run_pty(args, url, token)
+
+
+if __name__ == "__main__":
+    main()

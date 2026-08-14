@@ -1,6 +1,11 @@
 "use client";
 
-import { BotIcon, CalendarClock, MessagesSquare } from "lucide-react";
+import {
+  BotIcon,
+  CalendarClock,
+  MessagesSquare,
+  SquareTerminal,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -86,6 +91,20 @@ export function WorkspaceNavChatList() {
             >
               <CalendarClock />
               <span>{t.sidebar.scheduledTasks}</span>
+            </Link>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            isActive={pathname.startsWith("/workspace/remote-control")}
+            asChild
+          >
+            <Link
+              className="text-muted-foreground"
+              href="/workspace/remote-control"
+            >
+              <SquareTerminal />
+              <span>{t.sidebar.remoteControl}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

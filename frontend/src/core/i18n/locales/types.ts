@@ -225,6 +225,7 @@ export interface Translations {
     demoChats: string;
     agents: string;
     scheduledTasks: string;
+    remoteControl: string;
     agentsDisabledTooltip: string;
     channels: string;
   };

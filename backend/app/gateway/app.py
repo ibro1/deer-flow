@@ -30,6 +30,7 @@ from app.gateway.routers import (
     memory,
     models,
     openclaude,
+    remote_control,
     runs,
     scheduled_tasks,
     skills,
@@ -644,6 +645,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
     app.include_router(scheduled_tasks.router)
+
+    # Remote Control API (terminal coding-agent sessions) is mounted at
+    # /api/remote-control
+    app.include_router(remote_control.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
