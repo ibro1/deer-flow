@@ -139,10 +139,53 @@ def banner(relay: Relay, url: str):
 
 
 # ------------------------------------------------------------- claude mode
+def resolve_claude_bin():
+    """Find the Claude Code binary even when it is only a shell alias.
+
+    The native installer often exposes `claude` as an interactive-shell alias
+    (e.g. to ~/.claude/local/claude), which `shutil.which` cannot see.
+    """
+    override = os.environ.get("DEER_REMOTE_CLAUDE_BIN")
+    if override:
+        return override
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for candidate in (
+        os.path.join(home, ".claude", "local", "claude"),
+        os.path.join(home, ".local", "bin", "claude"),
+        "/usr/local/bin/claude",
+        "/opt/claude/claude",
+    ):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    # Last resort: ask an interactive login shell (sees .bashrc aliases/PATH).
+    try:
+        out = subprocess.run(
+            ["bash", "-lic", "type -P claude 2>/dev/null || alias claude 2>/dev/null"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if out.startswith("alias"):
+            # alias claude='/path/to/claude' -> extract the path
+            out = out.split("=", 1)[-1].strip("'\" ")
+        if out and os.path.isfile(os.path.expanduser(out)):
+            return os.path.expanduser(out)
+    except Exception:
+        pass
+    return None
+
+
 def run_claude(args, url, token):
     name = args.name or f"claude:{os.path.basename(os.getcwd())}"
+    claude_bin = resolve_claude_bin()
+    if not claude_bin:
+        sys.exit(
+            "deer-remote: cannot find the `claude` binary.\n"
+            "  Set DEER_REMOTE_CLAUDE_BIN=/path/to/claude (find it with: type -a claude)"
+        )
     cmd = [
-        "claude", "-p", "--verbose",
+        claude_bin, "-p", "--verbose",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
     ] + (args.rest or [])
@@ -301,8 +344,6 @@ def main():
     if not url:
         sys.exit("deer-remote: set DEER_REMOTE_URL (and DEER_REMOTE_TOKEN)")
     if args.mode == "claude":
-        if not shutil.which("claude"):
-            sys.exit("deer-remote: `claude` not found on PATH")
         run_claude(args, url, token)
     else:
         run_pty(args, url, token)
