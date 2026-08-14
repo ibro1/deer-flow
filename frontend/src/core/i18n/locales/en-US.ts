@@ -307,6 +307,8 @@ export const enUS: Translations = {
       chat: "Chat",
       remote: "Remote",
     },
+    remoteSessions: "Sessions",
+    remoteSessionsEmpty: "No sessions yet",
   },
 
   // Scheduled tasks

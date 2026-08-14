@@ -232,6 +232,8 @@ export interface Translations {
       chat: string;
       remote: string;
     };
+    remoteSessions: string;
+    remoteSessionsEmpty: string;
   };
 
   // Scheduled tasks

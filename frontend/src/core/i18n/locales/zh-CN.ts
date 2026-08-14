@@ -291,6 +291,8 @@ export const zhCN: Translations = {
       chat: "对话",
       remote: "远程",
     },
+    remoteSessions: "会话",
+    remoteSessionsEmpty: "暂无会话",
   },
 
   // 定时任务

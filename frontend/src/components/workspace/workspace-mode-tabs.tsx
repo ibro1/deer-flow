@@ -28,7 +28,7 @@ export function WorkspaceModeTabs() {
   }
 
   return (
-    <div className="bg-muted mx-2 mb-1 hidden grid-cols-2 gap-1 rounded-lg p-1 md:grid">
+    <div className="bg-muted mx-2 mb-1 grid grid-cols-2 gap-1 rounded-lg p-1">
       <Link
         href="/workspace/chats"
         className={cn(

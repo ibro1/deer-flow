@@ -13,7 +13,8 @@ import {
   SquareTerminal,
   WrenchIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -71,8 +72,18 @@ function groupEvents(events: RemoteEvent[]): RenderItem[] {
 }
 
 export default function RemoteControlPage() {
+  return (
+    <Suspense fallback={null}>
+      <RemoteControlPageInner />
+    </Suspense>
+  );
+}
+
+function RemoteControlPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const selectedId = searchParams.get("session");
   const [sessions, setSessions] = useState<RemoteSession[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [events, setEvents] = useState<RemoteEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [input, setInput] = useState("");
@@ -142,16 +153,29 @@ export default function RemoteControlPage() {
 
   const selected = sessions.find((s) => s.id === selectedId);
 
+  const selectSession = useCallback(
+    (id: string | null) => {
+      router.push(
+        id
+          ? `/workspace/remote-control?session=${encodeURIComponent(id)}`
+          : "/workspace/remote-control",
+      );
+    },
+    [router],
+  );
+
   return (
     <WorkspaceContainer>
       <WorkspaceHeader />
       <WorkspaceBody className="items-stretch">
         <div className="flex min-h-0 w-full flex-1">
+          {/* Mobile-only inline list; on desktop the workspace sidebar
+              shows the sessions (RemoteSessionsList). */}
           <SessionList
-            className={cn(selected && "hidden sm:flex")}
+            className={cn("sm:hidden", selected && "hidden")}
             sessions={sessions}
             selectedId={selectedId}
-            onSelect={setSelectedId}
+            onSelect={selectSession}
           />
           <div
             className={cn(
@@ -163,7 +187,7 @@ export default function RemoteControlPage() {
               <>
                 <div className="flex min-w-0 items-center gap-2 border-b px-2 py-2 sm:px-4">
                   <button
-                    onClick={() => setSelectedId(null)}
+                    onClick={() => selectSession(null)}
                     className="hover:bg-accent rounded p-1 sm:hidden"
                     aria-label="Back to sessions"
                   >
