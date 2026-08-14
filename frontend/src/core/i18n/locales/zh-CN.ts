@@ -287,6 +287,10 @@ export const zhCN: Translations = {
     scheduledTasks: "定时任务",
     remoteControl: "远程控制",
     agentsDisabledTooltip: "功能未启用",
+    tabs: {
+      chat: "对话",
+      remote: "远程",
+    },
   },
 
   // 定时任务

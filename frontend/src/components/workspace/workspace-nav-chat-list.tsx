@@ -94,7 +94,9 @@ export function WorkspaceNavChatList() {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
-        <SidebarMenuItem>
+        {/* On desktop the Chat/Remote mode tabs (sidebar header) cover this;
+            keep the menu item for the mobile sheet. */}
+        <SidebarMenuItem className="md:hidden">
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/remote-control")}
             asChild

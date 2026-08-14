@@ -228,6 +228,10 @@ export interface Translations {
     remoteControl: string;
     agentsDisabledTooltip: string;
     channels: string;
+    tabs: {
+      chat: string;
+      remote: string;
+    };
   };
 
   // Scheduled tasks

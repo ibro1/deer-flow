@@ -12,6 +12,7 @@ import {
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
 import { RecentChatList } from "./recent-chat-list";
 import { WorkspaceHeader } from "./workspace-header";
+import { WorkspaceModeTabs } from "./workspace-mode-tabs";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
 import { WorkspaceNavMenu } from "./workspace-nav-menu";
 
@@ -24,6 +25,7 @@ export function WorkspaceSidebar({
       <Sidebar variant="sidebar" collapsible="icon" {...props}>
         <SidebarHeader className="py-0">
           <WorkspaceHeader />
+          <WorkspaceModeTabs />
         </SidebarHeader>
         <SidebarContent>
           <WorkspaceNavChatList />

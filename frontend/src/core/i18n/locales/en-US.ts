@@ -303,6 +303,10 @@ export const enUS: Translations = {
     scheduledTasks: "Scheduled tasks",
     remoteControl: "Remote control",
     agentsDisabledTooltip: "Feature not enabled",
+    tabs: {
+      chat: "Chat",
+      remote: "Remote",
+    },
   },
 
   // Scheduled tasks
