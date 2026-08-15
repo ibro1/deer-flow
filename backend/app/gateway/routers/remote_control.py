@@ -195,6 +195,33 @@ async def _require_user(request: Request) -> Any:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/resolve-session")
+async def resolve_session(name: str = Query(...), token: str = Query("")) -> dict[str, Any]:
+    """Look up a session id by its (custom or auto-generated) name.
+
+    Token-authed like the agent WS, not cookie-authed: this exists purely so
+    the headless `deer-remote --resume <name>` CLI can resolve a human name
+    to an id without needing a browser session.
+    """
+    if not _agent_token_ok(token):
+        raise HTTPException(status_code=401, detail="bad token")
+
+    def _query() -> Any:
+        conn = _db()
+        row = conn.execute(
+            "SELECT id FROM rc_sessions WHERE LOWER(COALESCE(custom_name, name))=LOWER(?) "
+            "ORDER BY last_active DESC LIMIT 1",
+            (name,),
+        ).fetchone()
+        conn.close()
+        return row
+
+    row = await asyncio.to_thread(_query)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no session named {name!r}")
+    return {"id": row["id"]}
+
+
 @router.get("/sessions")
 async def list_sessions(request: Request) -> list[dict[str, Any]]:
     await _require_user(request)
