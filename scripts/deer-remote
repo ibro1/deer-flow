@@ -199,11 +199,23 @@ def run_claude(args, url, token):
             "deer-remote: cannot find the `claude` binary.\n"
             "  Set DEER_REMOTE_CLAUDE_BIN=/path/to/claude (find it with: type -a claude)"
         )
+    extra = args.rest or []
+    # `claude -p` (headless/print mode, required for stream-json) has no TTY
+    # to answer permission prompts, so any tool call needing approval —
+    # writing a new file, mkdir outside the initially-trusted dir, etc. —
+    # is silently denied ("you haven't granted it yet"). Default to
+    # acceptEdits so file writes/edits work out of the box; pass your own
+    # --permission-mode / --dangerously-skip-permissions to override.
+    if not any(
+        a in ("--permission-mode", "--dangerously-skip-permissions")
+        for a in extra
+    ):
+        extra = ["--permission-mode", "acceptEdits", *extra]
     cmd = [
         claude_bin, "-p", "--verbose",
         "--input-format", "stream-json",
         "--output-format", "stream-json",
-    ] + (args.rest or [])
+    ] + extra
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=sys.stderr, text=True, bufsize=1,
