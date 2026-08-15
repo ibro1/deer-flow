@@ -345,15 +345,20 @@ export default function AgentChatPage() {
 
               <div
                 className={cn(
-                  "right-0 bottom-0 left-0 z-30 flex justify-center px-3 sm:px-4",
-                  isWelcomeMode ? "absolute" : "relative shrink-0 pb-4",
+                  "flex justify-center px-3 sm:px-4",
+                  // Welcome mode: a real centered overlay (my-auto on the
+                  // child) instead of the old bottom-anchored 50vh translate
+                  // hack, which pushed the block into the header on short
+                  // mobile viewports. z-20 keeps the z-30 header clickable.
+                  isWelcomeMode
+                    ? "absolute inset-0 z-20 overflow-y-auto pt-14 pb-4"
+                    : "relative z-30 shrink-0 pb-4",
                 )}
               >
                 <div
                   className={cn(
                     "relative w-full",
-                    isWelcomeMode &&
-                      "-translate-y-[calc(50vh-48px)] sm:-translate-y-[calc(50vh-96px)]",
+                    isWelcomeMode && "my-auto",
                     isWelcomeMode
                       ? "max-w-(--container-width-sm)"
                       : "max-w-(--container-width-md)",
