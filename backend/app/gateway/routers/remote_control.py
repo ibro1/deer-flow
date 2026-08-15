@@ -55,7 +55,9 @@ MAX_EVENT_BYTES = 512 * 1024  # reject absurdly large single events
 def _db_path() -> str:
     return os.environ.get(
         "REMOTE_CONTROL_DB",
-        str(Path(".deerflow") / "remote_control.db"),
+        # `.deer-flow` is the project state dir (volume-mounted in the
+        # docker deployments) so transcripts survive container recreation.
+        str(Path(".deer-flow") / "remote_control.db"),
     )
 
 
@@ -282,6 +284,10 @@ async def delete_session(sid: str, request: Request) -> dict[str, Any]:
     sess = _sessions.pop(sid, None)
     if sess is not None and sess.agent_ws is not None:
         try:
+            # Explicit control message: the bridge stops its reconnect loop on
+            # this (a bare close is indistinguishable from a network blip and
+            # would make the bridge re-register the deleted session).
+            await sess.agent_ws.send_text(json.dumps({"type": "deleted"}))
             await sess.agent_ws.close(code=4410)
         except Exception:
             pass

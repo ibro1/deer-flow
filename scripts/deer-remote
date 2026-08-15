@@ -107,6 +107,21 @@ class Relay:
                         m = json.loads(ws.recv())
                         if m.get("type") == "user_message":
                             self.on_user_message(m.get("text", ""))
+                        elif m.get("type") == "deleted":
+                            # Session removed from the server: detach for good
+                            # instead of re-registering it on reconnect. The
+                            # local terminal keeps running, just unbridged.
+                            self.stop = True
+                            print(
+                                f"\n{DIM}[deer-remote] session deleted on "
+                                f"server — detached (terminal keeps running "
+                                f"locally){RESET}"
+                            )
+                            try:
+                                ws.close()
+                            except Exception:
+                                pass
+                            return
                     except websocket.WebSocketTimeoutException:
                         pass
                     if time.time() - last_ping > 25:
