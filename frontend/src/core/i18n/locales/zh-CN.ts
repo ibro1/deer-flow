@@ -293,6 +293,11 @@ export const zhCN: Translations = {
     },
     remoteSessions: "会话",
     remoteSessionsEmpty: "暂无会话",
+    remoteSessionPin: "置顶",
+    remoteSessionUnpin: "取消置顶",
+    remoteSessionCopyId: "复制会话 ID",
+    remoteSessionRenameTitle: "重命名会话",
+    remoteSessionDeleteConfirm: "删除该会话及其记录？",
   },
 
   // 定时任务

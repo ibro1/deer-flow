@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/remote-control", tags=["remote-control"])
@@ -77,6 +78,15 @@ def _db() -> sqlite3.Connection:
         );
         """
     )
+    # Lightweight migrations for pre-existing databases.
+    for ddl in (
+        "ALTER TABLE rc_sessions ADD COLUMN custom_name TEXT",
+        "ALTER TABLE rc_sessions ADD COLUMN pinned INTEGER DEFAULT 0",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # column already exists
     return conn
 
 
@@ -190,7 +200,10 @@ async def list_sessions(request: Request) -> list[dict[str, Any]]:
     def _query() -> list[dict[str, Any]]:
         conn = _db()
         rows = conn.execute(
-            "SELECT * FROM rc_sessions ORDER BY last_active DESC LIMIT 200"
+            # Stable ordering: pinned first, then creation time. Ordering by
+            # last_active makes rows jump around on every poll while agents
+            # are streaming (activity is signalled by the live dot instead).
+            "SELECT * FROM rc_sessions ORDER BY pinned DESC, created DESC LIMIT 200"
         ).fetchall()
         conn.close()
         return [dict(r) for r in rows]
@@ -199,6 +212,8 @@ async def list_sessions(request: Request) -> list[dict[str, Any]]:
     for d in out:
         sess = _sessions.get(d["id"])
         d["connected"] = bool(sess and sess.agent_ws is not None)
+        d["name"] = d.get("custom_name") or d["name"]
+        d["pinned"] = bool(d.get("pinned"))
     return out
 
 
@@ -219,6 +234,69 @@ async def session_events(
         return [json.loads(r["payload"]) for r in rows]
 
     return await asyncio.to_thread(_query)
+
+
+class SessionUpdateRequest(BaseModel):
+    name: str | None = None
+    pinned: bool | None = None
+
+
+@router.patch("/sessions/{sid}")
+async def update_session(
+    sid: str, body: SessionUpdateRequest, request: Request
+) -> dict[str, Any]:
+    """Rename (stored as custom_name so bridge reconnects don't clobber it)
+    and/or pin a session."""
+    await _require_user(request)
+
+    def _update() -> int:
+        conn = _db()
+        sets, params = [], []
+        if body.name is not None:
+            sets.append("custom_name=?")
+            params.append(body.name.strip()[:200])
+        if body.pinned is not None:
+            sets.append("pinned=?")
+            params.append(1 if body.pinned else 0)
+        if not sets:
+            conn.close()
+            return 1
+        params.append(sid)
+        cur = conn.execute(
+            f"UPDATE rc_sessions SET {', '.join(sets)} WHERE id=?", params
+        )
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+
+    if await asyncio.to_thread(_update) == 0:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"ok": True}
+
+
+@router.delete("/sessions/{sid}")
+async def delete_session(sid: str, request: Request) -> dict[str, Any]:
+    """Delete a session and its transcript. Live agent bridges are
+    disconnected first (they may re-register as a fresh session)."""
+    await _require_user(request)
+    sess = _sessions.pop(sid, None)
+    if sess is not None and sess.agent_ws is not None:
+        try:
+            await sess.agent_ws.close(code=4410)
+        except Exception:
+            pass
+
+    def _delete() -> int:
+        conn = _db()
+        conn.execute("DELETE FROM rc_events WHERE session_id=?", (sid,))
+        cur = conn.execute("DELETE FROM rc_sessions WHERE id=?", (sid,))
+        conn.commit()
+        conn.close()
+        return cur.rowcount
+
+    if await asyncio.to_thread(_delete) == 0:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------

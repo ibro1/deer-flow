@@ -12,6 +12,7 @@ export interface RemoteSession {
   last_active: number;
   status: string;
   connected: boolean;
+  pinned: boolean;
 }
 
 /** One transcript event as stored/broadcast by the gateway relay. */
@@ -74,4 +75,37 @@ export function remoteSessionStreamURL(sessionId: string): string {
         : "";
   const wsOrigin = origin.replace(/^http/i, "ws");
   return `${wsOrigin}/api/remote-control/ws/client/${encodeURIComponent(sessionId)}`;
+}
+
+export async function updateRemoteSession(
+  sessionId: string,
+  update: { name?: string; pinned?: boolean },
+): Promise<void> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/remote-control/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    },
+  );
+  if (!response.ok) {
+    await throwGatewayApiError(
+      response,
+      `Failed to update session: ${response.statusText}`,
+    );
+  }
+}
+
+export async function deleteRemoteSession(sessionId: string): Promise<void> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/remote-control/sessions/${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok) {
+    await throwGatewayApiError(
+      response,
+      `Failed to delete session: ${response.statusText}`,
+    );
+  }
 }

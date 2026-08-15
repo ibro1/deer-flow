@@ -309,6 +309,11 @@ export const enUS: Translations = {
     },
     remoteSessions: "Sessions",
     remoteSessionsEmpty: "No sessions yet",
+    remoteSessionPin: "Pin",
+    remoteSessionUnpin: "Unpin",
+    remoteSessionCopyId: "Copy session ID",
+    remoteSessionRenameTitle: "Rename session",
+    remoteSessionDeleteConfirm: "Delete this session and its transcript?",
   },
 
   // Scheduled tasks

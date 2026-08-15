@@ -234,6 +234,11 @@ export interface Translations {
     };
     remoteSessions: string;
     remoteSessionsEmpty: string;
+    remoteSessionPin: string;
+    remoteSessionUnpin: string;
+    remoteSessionCopyId: string;
+    remoteSessionRenameTitle: string;
+    remoteSessionDeleteConfirm: string;
   };
 
   // Scheduled tasks
