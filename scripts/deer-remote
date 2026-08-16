@@ -147,6 +147,28 @@ class Relay:
                 backoff = min(backoff * 2, 15)
 
 
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def resolve_session_id(url: str, token: str, resume: str) -> str:
+    """Resolve --resume: pass an id through as-is, else look up by name."""
+    if _SESSION_ID_RE.match(resume):
+        return resume
+    base = url.rstrip("/")
+    if "/api/remote-control" not in base:
+        base = f"{base}/api/remote-control"
+    query = urllib.parse.urlencode({"name": resume, "token": token})
+    try:
+        with urllib.request.urlopen(f"{base}/resolve-session?{query}", timeout=10) as resp:
+            return json.loads(resp.read())["id"]
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            sys.exit(f"deer-remote: no session named {resume!r} found")
+        sys.exit(f"deer-remote: --resume lookup failed: HTTP {exc.code}")
+    except Exception as exc:
+        sys.exit(f"deer-remote: --resume lookup failed: {exc}")
+
+
 def make_hello(agent: str, name: str) -> dict:
     return {
         "type": "hello",
@@ -371,6 +393,12 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["claude", "pty"])
     ap.add_argument("--name", help="session display name")
+    ap.add_argument(
+        "--resume",
+        metavar="ID_OR_NAME",
+        help="append to an existing session by id or display name "
+             "(overrides DEER_REMOTE_SESSION)",
+    )
     argv = sys.argv[1:]
     rest = []
     if "--" in argv:
@@ -383,6 +411,8 @@ def main():
     token = os.environ.get("DEER_REMOTE_TOKEN", "")
     if not url:
         sys.exit("deer-remote: set DEER_REMOTE_URL (and DEER_REMOTE_TOKEN)")
+    if args.resume:
+        os.environ["DEER_REMOTE_SESSION"] = resolve_session_id(url, token, args.resume)
     if args.mode == "claude":
         run_claude(args, url, token)
     else:
