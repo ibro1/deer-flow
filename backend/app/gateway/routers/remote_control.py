@@ -45,6 +45,11 @@ router = APIRouter(prefix="/api/remote-control", tags=["remote-control"])
 
 MAX_BACKLOG_SEND = 2000  # events replayed to a freshly-connected client
 MAX_EVENT_BYTES = 512 * 1024  # reject absurdly large single events
+MAX_IMAGES_PER_MESSAGE = 4
+# Defensive backstop only — the client compresses to ~1568px JPEG before
+# sending, and the underlying WS transport's own frame-size limit is the
+# real binding constraint in practice.
+MAX_IMAGE_B64_CHARS = 4_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -451,12 +456,29 @@ async def ws_client(ws: WebSocket, sid: str) -> None:
             if msg.get("type") != "user_message":
                 continue
             text = str(msg.get("text", ""))[:100_000]
+            images: list[dict[str, str]] = []
+            raw_images = msg.get("images")
+            if isinstance(raw_images, list):
+                for item in raw_images[:MAX_IMAGES_PER_MESSAGE]:
+                    if not isinstance(item, dict):
+                        continue
+                    data = str(item.get("data", ""))[:MAX_IMAGE_B64_CHARS]
+                    if not data:
+                        continue
+                    media_type = str(item.get("media_type") or "image/jpeg")[:50]
+                    images.append({"media_type": media_type, "data": data})
+            if not text and not images:
+                continue
             if sess.agent_ws is not None:
-                await sess.agent_ws.send_text(
-                    json.dumps({"type": "user_message", "text": text})
-                )
+                payload: dict[str, Any] = {"type": "user_message", "text": text}
+                if images:
+                    payload["images"] = images
+                await sess.agent_ws.send_text(json.dumps(payload))
+                broadcast_data: dict[str, Any] = {"text": text}
+                if images:
+                    broadcast_data["images"] = images
                 await _record_and_broadcast(
-                    sess, {"type": "remote_user_message", "data": {"text": text}}
+                    sess, {"type": "remote_user_message", "data": broadcast_data}
                 )
             else:
                 await ws.send_text(

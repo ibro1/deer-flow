@@ -119,7 +119,7 @@ class Relay:
                     try:
                         m = json.loads(ws.recv())
                         if m.get("type") == "user_message":
-                            self.on_user_message(m.get("text", ""))
+                            self.on_user_message(m.get("text", ""), m.get("images"))
                         elif m.get("type") == "deleted":
                             # Session removed from the server: detach for good
                             # instead of re-registering it on reconnect. The
@@ -264,11 +264,25 @@ def run_claude(args, url, token):
     )
     lock = threading.Lock()
 
-    def send_user_turn(text: str, origin: str):
-        msg = {
-            "type": "user",
-            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
-        }
+    def send_user_turn(text: str, origin: str, images=None):
+        content = []
+        for img in (images or []):
+            data = img.get("data", "")
+            if not data:
+                continue
+            content.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img.get("media_type") or "image/jpeg",
+                    "data": data,
+                },
+            })
+        if text:
+            content.append({"type": "text", "text": text})
+        if not content:
+            return
+        msg = {"type": "user", "message": {"role": "user", "content": content}}
         with lock:
             try:
                 proc.stdin.write(json.dumps(msg) + "\n")
@@ -276,12 +290,13 @@ def run_claude(args, url, token):
             except Exception:
                 return
         if origin == "remote":
-            print(f"\n{CYAN}[remote]{RESET} {text}")
+            note = f" {DIM}[+{len(images)} image(s)]{RESET}" if images else ""
+            print(f"\n{CYAN}[remote]{RESET} {text}{note}")
         else:
             relay.send({"type": "local_user_message", "data": {"text": text}})
 
     relay = Relay(url, token, make_hello("claude-code", name),
-                  lambda t: send_user_turn(t, "remote"))
+                  lambda t, imgs=None: send_user_turn(t, "remote", imgs))
     banner(relay, url)
 
     def read_stdout():
@@ -352,7 +367,13 @@ def run_pty(args, url, token):
     )
     os.close(slave)
 
-    def inject(text: str):
+    def inject(text: str, images=None):
+        if images:
+            print(
+                f"\n{DIM}[deer-remote] {len(images)} pasted image(s) ignored — "
+                f"PTY mode has no image channel; use `deer-remote claude` for "
+                f"image support{RESET}"
+            )
         try:
             os.write(master, text.encode() + b"\r")
         except OSError:

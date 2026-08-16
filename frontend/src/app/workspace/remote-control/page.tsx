@@ -9,9 +9,11 @@
 import {
   ChevronLeftIcon,
   CircleIcon,
+  ImagePlusIcon,
   SendIcon,
   SquareTerminal,
   WrenchIcon,
+  XIcon,
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
@@ -38,6 +40,65 @@ const ANSI_RE =
 
 function stripAnsi(text: string): string {
   return text.replace(ANSI_RE, "");
+}
+
+// Image paste/drop — structured Claude sessions only (stream-json supports
+// inline base64 image content blocks; a PTY has no equivalent channel).
+const MAX_IMAGES_PER_MESSAGE = 4;
+// Claude's own recommended max long-edge; also keeps the compressed JPEG
+// comfortably under typical WebSocket frame-size limits without needing any
+// server/infra changes.
+const MAX_IMAGE_DIMENSION = 1568;
+const IMAGE_JPEG_QUALITY = 0.85;
+
+interface PendingImage {
+  id: string;
+  mediaType: string;
+  data: string; // base64, no `data:` prefix
+  previewUrl: string;
+}
+
+function compressImageFile(file: File): Promise<PendingImage | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => resolve(null);
+      img.onload = () => {
+        const scale = Math.min(
+          1,
+          MAX_IMAGE_DIMENSION / Math.max(img.width, img.height),
+        );
+        const width = Math.max(1, Math.round(img.width * scale));
+        const height = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL("image/jpeg", IMAGE_JPEG_QUALITY);
+        const comma = dataUrl.indexOf(",");
+        const data = comma >= 0 ? dataUrl.slice(comma + 1) : "";
+        if (!data) {
+          resolve(null);
+          return;
+        }
+        resolve({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          mediaType: "image/jpeg",
+          data,
+          previewUrl: dataUrl,
+        });
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 function decodeTty(event: RemoteEvent): string {
@@ -87,6 +148,7 @@ function RemoteControlPageInner() {
   const [events, setEvents] = useState<RemoteEvent[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
   const [input, setInput] = useState("");
+  const [pendingImages, setPendingImages] = useState<PendingImage[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const feedRef = useRef<HTMLDivElement | null>(null);
 
@@ -143,13 +205,39 @@ function RemoteControlPageInner() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [events]);
 
+  const addImageFiles = useCallback((files: File[]) => {
+    const imageFiles = files.filter((f) => f.type.startsWith("image/"));
+    if (imageFiles.length === 0) return;
+    void Promise.all(imageFiles.map(compressImageFile)).then((results) => {
+      const compressed = results.filter((x): x is PendingImage => x !== null);
+      if (compressed.length === 0) return;
+      setPendingImages((prev) =>
+        [...prev, ...compressed].slice(0, MAX_IMAGES_PER_MESSAGE),
+      );
+    });
+  }, []);
+
+  const removeImage = useCallback((id: string) => {
+    setPendingImages((prev) => prev.filter((img) => img.id !== id));
+  }, []);
+
   const send = useCallback(() => {
     const text = input.trim();
     const ws = wsRef.current;
-    if (!text || ws?.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: "user_message", text }));
+    if ((!text && pendingImages.length === 0) || ws?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    const payload: Record<string, unknown> = { type: "user_message", text };
+    if (pendingImages.length > 0) {
+      payload.images = pendingImages.map(({ mediaType, data }) => ({
+        media_type: mediaType,
+        data,
+      }));
+    }
+    ws.send(JSON.stringify(payload));
     setInput("");
-  }, [input]);
+    setPendingImages([]);
+  }, [input, pendingImages]);
 
   const selected = sessions.find((s) => s.id === selectedId);
 
@@ -230,6 +318,10 @@ function RemoteControlPageInner() {
                   onChange={setInput}
                   onSend={send}
                   disabled={!selected.connected}
+                  images={pendingImages}
+                  onAddFiles={addImageFiles}
+                  onRemoveImage={removeImage}
+                  imagesSupported={selected.agent === "claude-code"}
                 />
               </>
             ) : (
@@ -368,8 +460,23 @@ function EventView({ event }: { event: RemoteEvent }) {
     );
   }
   if (event.type === "remote_user_message") {
+    const images =
+      (event.data?.images as { media_type: string; data: string }[] | undefined) ?? [];
     return (
       <Bubble role="you (remote)" highlight>
+        {images.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-2">
+            {images.map((img, i) => (
+               
+              <img
+                key={i}
+                src={`data:${img.media_type};base64,${img.data}`}
+                alt=""
+                className="max-h-40 rounded border object-contain"
+              />
+            ))}
+          </div>
+        )}
         {(event.data?.text as string) ?? ""}
       </Bubble>
     );
@@ -480,34 +587,118 @@ function Composer({
   onChange,
   onSend,
   disabled,
+  images,
+  onAddFiles,
+  onRemoveImage,
+  imagesSupported,
 }: {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
   disabled: boolean;
+  images: PendingImage[];
+  onAddFiles: (files: File[]) => void;
+  onRemoveImage: (id: string) => void;
+  imagesSupported: boolean;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const canAttach = imagesSupported && !disabled;
+
   return (
-    <div className="flex items-end gap-2 border-t p-3">
-      <Textarea
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            onSend();
+    <div className="border-t p-3">
+      {images.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {images.map((img) => (
+            <div key={img.id} className="group relative">
+              { }
+              <img
+                src={img.previewUrl}
+                alt=""
+                className="size-14 rounded border object-cover"
+              />
+              <button
+                type="button"
+                onClick={() => onRemoveImage(img.id)}
+                aria-label="Remove image"
+                className="bg-background absolute -top-1.5 -right-1.5 rounded-full border p-0.5 opacity-0 shadow-sm transition-opacity group-hover:opacity-100"
+              >
+                <XIcon className="size-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="flex items-end gap-2">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          hidden
+          onChange={(e) => {
+            if (e.target.files) onAddFiles(Array.from(e.target.files));
+            e.target.value = "";
+          }}
+        />
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          disabled={!canAttach}
+          title={
+            imagesSupported
+              ? "Attach image"
+              : "Image attachments need a structured `deer-remote claude` session"
           }
-        }}
-        placeholder={
-          disabled
-            ? "Agent offline — reconnect the bridge to send messages"
-            : "Send a message into the terminal session… (Enter to send)"
-        }
-        disabled={disabled}
-        className="max-h-40 min-h-11 flex-1 resize-none"
-      />
-      <Button onClick={onSend} disabled={disabled || !value.trim()} size="icon">
-        <SendIcon className="size-4" />
-      </Button>
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <ImagePlusIcon className="size-4" />
+        </Button>
+        <Textarea
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              onSend();
+            }
+          }}
+          onPaste={(e) => {
+            if (!canAttach) return;
+            const files = Array.from(e.clipboardData?.items ?? [])
+              .map((item) => (item.kind === "file" ? item.getAsFile() : null))
+              .filter((f): f is File => !!f && f.type.startsWith("image/"));
+            if (files.length > 0) onAddFiles(files);
+          }}
+          onDragOver={(e) => {
+            if (canAttach) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            if (!canAttach) return;
+            e.preventDefault();
+            const files = Array.from(e.dataTransfer?.files ?? []).filter((f) =>
+              f.type.startsWith("image/"),
+            );
+            if (files.length > 0) onAddFiles(files);
+          }}
+          placeholder={
+            disabled
+              ? "Agent offline — reconnect the bridge to send messages"
+              : imagesSupported
+                ? "Send a message… (Enter to send, paste/drop images)"
+                : "Send a message into the terminal session… (Enter to send)"
+          }
+          disabled={disabled}
+          className="max-h-40 min-h-11 flex-1 resize-none"
+        />
+        <Button
+          onClick={onSend}
+          disabled={disabled || (!value.trim() && images.length === 0)}
+          size="icon"
+        >
+          <SendIcon className="size-4" />
+        </Button>
+      </div>
     </div>
   );
 }
