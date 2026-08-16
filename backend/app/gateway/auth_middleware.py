@@ -40,6 +40,11 @@ _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     # Inbound webhooks authenticate themselves via provider-specific signatures
     # (e.g. GitHub's X-Hub-Signature-256), not session cookies.
     "/api/webhooks/",
+    # The headless deer-remote CLI has no browser session cookie; it
+    # authenticates with REMOTE_CONTROL_TOKEN (checked inside the route
+    # itself, same model as /api/remote-control/ws/agent — WS upgrades
+    # bypass this middleware structurally, this plain REST route does not).
+    "/api/remote-control/resolve-session",
 )
 
 # Exact auth paths that are public (login/register/status check).

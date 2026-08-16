@@ -158,8 +158,15 @@ def resolve_session_id(url: str, token: str, resume: str) -> str:
     if "/api/remote-control" not in base:
         base = f"{base}/api/remote-control"
     query = urllib.parse.urlencode({"name": resume, "token": token})
+    # Explicit UA: urllib's default ("Python-urllib/x.y") is a well-known bot
+    # signature that CDN/WAF layers (e.g. Cloudflare bot-fight-mode) reject
+    # with a bare 403 before the request ever reaches the app.
+    req = urllib.request.Request(
+        f"{base}/resolve-session?{query}",
+        headers={"User-Agent": "deer-remote/1.0 (+https://github.com/ibro1/deer-flow)"},
+    )
     try:
-        with urllib.request.urlopen(f"{base}/resolve-session?{query}", timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read())["id"]
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
