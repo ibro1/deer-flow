@@ -66,30 +66,90 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SUBPROCESS_TIMEOUT_SECONDS = 300
 
+# Linux caps a *single* argv element at MAX_ARG_STRLEN (32 pages = 128 KiB) and
+# execve() fails with E2BIG / OSError errno 7. The prompt goes through `-p
+# <prompt>` as one argument, so a long flattened history (the memory updater
+# routinely produces one) crashes the call. Stay well under the cap to leave
+# room for the rest of argv and the environment block.
+DEFAULT_MAX_PROMPT_CHARS = 96_000
 
-def _flatten_messages(messages: list[BaseMessage]) -> str:
+_ELISION_MARKER = "\n\n[... earlier conversation elided to fit the agy CLI argument limit ...]\n\n"
+
+
+def _render_message(m: BaseMessage) -> str:
+    if isinstance(m, SystemMessage):
+        role = "System"
+    elif isinstance(m, HumanMessage):
+        role = "Human"
+    elif isinstance(m, ToolMessage):
+        role = "Tool"
+    elif isinstance(m, AIMessage):
+        role = "Assistant"
+    else:
+        role = m.type.capitalize() if getattr(m, "type", None) else "Message"
+    content = m.content if isinstance(m.content, str) else json.dumps(m.content)
+    return f"[{role}]\n{content}"
+
+
+def _flatten_messages(
+    messages: list[BaseMessage],
+    max_chars: int = DEFAULT_MAX_PROMPT_CHARS,
+) -> str:
     """Flatten a LangChain message history into a single `agy -p` prompt.
 
     `agy` headless mode takes one prompt string per invocation — there is no
     multi-message chat-completion endpoint to call into. This mirrors how
     ``ClaudeChatModel`` forwards the full message list statelessly on every
     call rather than relying on the underlying CLI's own session concept.
+
+    Because the prompt is passed as a single argv element, it must stay under
+    the kernel's per-argument limit. When the full history doesn't fit we keep
+    the system messages (instructions) and as many of the *most recent* turns
+    as will fit, dropping from the middle — the same shape a context window
+    would trim, rather than truncating the tail and losing the actual question.
     """
-    parts: list[str] = []
-    for m in messages:
-        if isinstance(m, SystemMessage):
-            role = "System"
-        elif isinstance(m, HumanMessage):
-            role = "Human"
-        elif isinstance(m, ToolMessage):
-            role = "Tool"
-        elif isinstance(m, AIMessage):
-            role = "Assistant"
-        else:
-            role = m.type.capitalize() if getattr(m, "type", None) else "Message"
-        content = m.content if isinstance(m.content, str) else json.dumps(m.content)
-        parts.append(f"[{role}]\n{content}")
-    return "\n\n".join(parts)
+    rendered = [_render_message(m) for m in messages]
+    full = "\n\n".join(rendered)
+    if len(full) <= max_chars:
+        return full
+
+    system_parts = [r for m, r in zip(messages, rendered) if isinstance(m, SystemMessage)]
+    other_parts = [r for m, r in zip(messages, rendered) if not isinstance(m, SystemMessage)]
+
+    head = "\n\n".join(system_parts)
+    budget = max_chars - len(head) - len(_ELISION_MARKER)
+    if budget <= 0:
+        # System prompt alone exceeds the limit — keep its tail so the most
+        # recent/specific instructions survive.
+        logger.warning(
+            "agy prompt: system messages alone exceed %d chars; truncating them.",
+            max_chars,
+        )
+        return head[-max_chars:]
+
+    kept: list[str] = []
+    used = 0
+    for part in reversed(other_parts):
+        cost = len(part) + 2  # separator
+        if used + cost > budget:
+            break
+        kept.append(part)
+        used += cost
+    kept.reverse()
+
+    logger.warning(
+        "agy prompt exceeded %d chars (%d); elided %d of %d non-system messages "
+        "to stay under the CLI argument limit.",
+        max_chars,
+        len(full),
+        len(other_parts) - len(kept),
+        len(other_parts),
+    )
+
+    tail = "\n\n".join(kept)
+    if head and tail:
+        return head + _ELISION_MARKER + tail
+    return (head or tail)[-max_chars:]
 
 
 class AntigravityChatModel(BaseChatModel):
@@ -104,6 +164,7 @@ class AntigravityChatModel(BaseChatModel):
     add_dirs: list[str] = Field(default_factory=list)
     print_timeout: str = "5m"
     subprocess_timeout_seconds: int = DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
+    max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
 
     # `agy` accepts no sampling params (temperature/max_tokens/etc.) over the
     # CLI, so silently ignore any such keys a shared config profile might
@@ -174,6 +235,17 @@ class AntigravityChatModel(BaseChatModel):
                 "login on this machine first — headless mode has no "
                 "token/API-key env var, only cached local credentials."
             ) from exc
+        except OSError as exc:
+            # errno 7 (E2BIG) — the prompt still exceeded the kernel's argv
+            # limit. _flatten_messages caps this, so reaching here means
+            # max_prompt_chars is configured too high for this host.
+            if exc.errno == 7:
+                raise RuntimeError(
+                    f"agy prompt too large for the CLI argument limit "
+                    f"({len(prompt)} chars). Lower `max_prompt_chars` for this "
+                    f"model in config.yaml (currently {self.max_prompt_chars})."
+                ) from exc
+            raise
 
         if proc.returncode != 0:
             raise RuntimeError(
@@ -200,7 +272,7 @@ class AntigravityChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        prompt = _flatten_messages(messages)
+        prompt = _flatten_messages(messages, max_chars=self.max_prompt_chars)
         data = self._run_agy(prompt)
         text = data.get("response", "")
 
