@@ -46,6 +46,29 @@ RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}";
 # Install uv (source image overridable via UV_IMAGE build arg)
 COPY --from=uv-source /uv /uvx /usr/local/bin/
 
+# Optionally install Google Antigravity CLI (`agy`) for
+# deerflow.models.antigravity_provider:AntigravityChatModel.
+# Off by default: the binary is ~200MB, so only pay for it when you use it.
+# Enable with:  docker build --build-arg INSTALL_AGY_CLI=true
+#
+# Auth note: headless `agy -p` uses credentials cached by a prior interactive
+# login *as this user, in this container*, under $HOME/.gemini. Persist that
+# directory with a volume or you must re-authenticate after every rebuild.
+# Alternatively set GEMINI_API_KEY, which skips interactive sign-in entirely
+# (but bills the Gemini API rather than an Antigravity subscription).
+ARG INSTALL_AGY_CLI=false
+RUN if [ "$INSTALL_AGY_CLI" = "true" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+        && rm -rf /var/lib/apt/lists/* \
+        && curl -fsSL https://antigravity.google/cli/install.sh -o /tmp/agy-install.sh \
+        && bash /tmp/agy-install.sh --dir /usr/local/bin \
+        && rm -f /tmp/agy-install.sh \
+        && agy --version ; \
+    fi
+# Let agy self-update inside a container write nothing: the image is immutable
+# and an auto-update would be lost on restart anyway.
+ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
+
 # Set working directory
 WORKDIR /app
 

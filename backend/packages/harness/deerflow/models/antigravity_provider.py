@@ -223,6 +223,12 @@ class AntigravityChatModel(BaseChatModel):
                 capture_output=True,
                 text=True,
                 timeout=self.subprocess_timeout_seconds,
+                # CRITICAL: without this agy inherits the gateway's stdin. When
+                # its cached credentials are missing/expired it prints an OAuth
+                # URL and blocks on "paste the authorization code here", hanging
+                # the call until the timeout. With stdin closed it instead exits
+                # non-zero and emits a clean JSON error envelope.
+                stdin=subprocess.DEVNULL,
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
@@ -247,21 +253,42 @@ class AntigravityChatModel(BaseChatModel):
                 ) from exc
             raise
 
+        # Parse stdout FIRST: agy emits a structured JSON error envelope even on
+        # non-zero exit (e.g. {"status": "ERROR", "error": "authentication
+        # failed or timed out"}). Surfacing that beats dumping raw stderr, which
+        # for auth failures is a wall of OAuth URL.
+        data: dict[str, Any] | None = None
+        if proc.stdout.strip():
+            try:
+                parsed = json.loads(proc.stdout)
+                if isinstance(parsed, dict):
+                    data = parsed
+            except json.JSONDecodeError:
+                data = None
+
+        if data is not None and data.get("status") != "SUCCESS":
+            agy_error = str(data.get("error") or "").strip()
+            if "auth" in agy_error.lower():
+                raise RuntimeError(
+                    f"agy authentication failed ({agy_error}). Headless runs use "
+                    "credentials cached by a prior interactive login as THIS "
+                    "user on THIS host — run `agy` interactively in the same "
+                    "container and complete sign-in, or set GEMINI_API_KEY. The "
+                    "credential directory (~/.gemini) must persist across "
+                    "container rebuilds or you will have to re-authenticate."
+                )
+            raise RuntimeError(f"agy run did not succeed: {agy_error or data}")
+
         if proc.returncode != 0:
             raise RuntimeError(
                 f"agy exited {proc.returncode}: "
                 f"{proc.stderr.strip() or proc.stdout.strip()}"
             )
 
-        try:
-            data = json.loads(proc.stdout)
-        except json.JSONDecodeError as exc:
+        if data is None:
             raise RuntimeError(
                 f"agy returned non-JSON stdout: {proc.stdout[:500]!r}"
-            ) from exc
-
-        if data.get("status") != "SUCCESS":
-            raise RuntimeError(f"agy run did not succeed: {data}")
+            )
 
         return data
 

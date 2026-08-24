@@ -29,6 +29,10 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        # Set to "true" to bake the Antigravity CLI (`agy`) into the gateway
+        # image for deerflow.models.antigravity_provider. Adds ~200MB.
+        INSTALL_AGY_CLI: "${INSTALL_AGY_CLI:-false}"
     working_dir: /app
     command: >
       sh -c "
@@ -69,6 +73,11 @@ services:
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/app/backend/.deer-flow
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
       - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills
+      # Antigravity CLI credential/state dir. The gateway runs as root, so agy
+      # caches its OAuth login under /root/.gemini. Without this bind mount the
+      # login is destroyed on every image rebuild and headless `agy -p` fails
+      # with "authentication failed or timed out".
+      - /etc/dokploy/compose/projects-deeflow-hlwseh/files/agy-home:/root/.gemini
       - /var/run/docker.sock:/var/run/docker.sock
       - /usr/bin/docker:/usr/bin/docker:ro
     extra_hosts:
