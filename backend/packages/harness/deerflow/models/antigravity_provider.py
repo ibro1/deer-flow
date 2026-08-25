@@ -48,6 +48,8 @@ import json
 import logging
 import shutil
 import subprocess
+import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
@@ -60,6 +62,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
 logger = logging.getLogger(__name__)
@@ -152,6 +157,109 @@ def _flatten_messages(
     return (head or tail)[-max_chars:]
 
 
+# ---------------------------------------------------------------------------
+# Tool-calling emulation
+#
+# `agy` has no native function-calling API — its headless envelope carries only
+# text. But `--json-schema` forces the reply into a shape we choose, and the
+# result comes back pre-parsed in the envelope's `structured_output` field.
+# Combined with `--mode plan` (which stops agy from executing its own tools and
+# makes it *propose* instead), that's enough to emulate tool calls: we describe
+# DeerFlow's tools in the prompt, constrain the answer to the envelope below,
+# and translate `type: "tool_call"` back into LangChain tool_calls.
+#
+# Verified against agy 1.1.20:
+#   plan mode + this schema -> structured_output:
+#     {"type": "tool_call", "tool_name": "get_weather",
+#      "tool_arguments": {"location": "Paris"}}
+# ---------------------------------------------------------------------------
+
+_TOOL_ENVELOPE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": ["text", "tool_call"]},
+        "text": {"type": "string"},
+        "tool_name": {"type": "string"},
+        "tool_arguments": {"type": "object"},
+    },
+    "required": ["type"],
+}
+
+_TOOL_PROMPT_PREAMBLE = """\
+You are the reasoning layer of another agent framework. You have NO tools of \
+your own and must NOT execute, read, write, or run anything yourself.
+
+The CALLER owns the tools listed below and will execute them for you.
+
+Respond ONLY with JSON matching the required schema:
+- To use a tool: set type="tool_call", tool_name to one of the tool names \
+below, and tool_arguments to an object matching that tool's parameters.
+- To answer directly: set type="text" and put your reply in the text field.
+
+Available tools:
+{tool_descriptions}
+"""
+
+
+def _describe_tools(tools: list[dict[str, Any]]) -> str:
+    """Render OpenAI-format tool schemas into prompt text agy can follow."""
+    lines: list[str] = []
+    for tool in tools:
+        fn = tool.get("function", tool)
+        name = fn.get("name", "")
+        if not name:
+            continue
+        description = (fn.get("description") or "").strip()
+        params = fn.get("parameters") or {}
+        lines.append(
+            f"- {name}: {description}\n  parameters (JSON Schema): {json.dumps(params)}"
+        )
+    return "\n".join(lines) if lines else "- (none)"
+
+
+def _extract_structured_fallback(response: str) -> dict[str, Any] | None:
+    """Recover the envelope from `response` when `structured_output` is absent.
+
+    agy normally supplies a parsed `structured_output`, but its `response`
+    field has been observed carrying several concatenated JSON objects (the
+    schema-shaped one plus a chattier variant with toolAction/toolSummary).
+    Scan lines from the end and return the first that looks like our envelope,
+    so a renamed/missing field in a future agy release degrades gracefully
+    instead of breaking the turn outright.
+    """
+    for line in reversed([ln.strip() for ln in (response or "").splitlines() if ln.strip()]):
+        try:
+            candidate = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and "type" in candidate:
+            return candidate
+    return None
+
+
+def _parse_tool_envelope(structured: dict[str, Any]) -> AIMessage:
+    """Translate agy's structured_output envelope into a LangChain AIMessage."""
+    if structured.get("type") == "tool_call":
+        name = structured.get("tool_name") or ""
+        args = structured.get("tool_arguments")
+        if not isinstance(args, dict):
+            args = {}
+        if name:
+            return AIMessage(
+                content=structured.get("text") or "",
+                tool_calls=[
+                    {
+                        "name": name,
+                        "args": args,
+                        "id": f"call_{uuid.uuid4().hex[:12]}",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        logger.warning("agy returned type=tool_call with no tool_name: %s", structured)
+    return AIMessage(content=structured.get("text") or "")
+
+
 class AntigravityChatModel(BaseChatModel):
     """LangChain chat model backed by the `agy` CLI's headless print mode."""
 
@@ -175,28 +283,35 @@ class AntigravityChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "antigravity-agy"
 
-    def bind_tools(self, tools: Any, **kwargs: Any) -> Any:
-        """Not supported — `agy -p` returns prose, not structured tool calls.
+    def bind_tools(
+        self,
+        tools: Sequence[dict[str, Any] | type | Any | BaseTool],
+        **kwargs: Any,
+    ) -> Runnable[Any, BaseMessage]:
+        """Emulated tool calling via `--json-schema` + `--mode plan`.
 
-        DeerFlow's lead agent binds its tool set to the model and drives a
-        tool-calling loop; `agy` headless mode exposes no tool-call channel
-        (its `--output-format json` envelope carries only a text `response`),
-        so this model cannot serve as the lead agent's model. It works fine
-        for text-only roles — title generation, memory updates, suggestions,
-        input polishing, or plain chat with tools disabled.
+        `agy` has no native function-calling API, so instead of a `tools`
+        parameter we constrain the reply to a small envelope schema and
+        describe the caller's tools in the prompt. Plan mode is what stops
+        agy from running its *own* tools and makes it propose instead —
+        without it, a tool-shaped request makes agy try to execute something
+        and die on the permission prompt headless mode can't answer.
 
-        Note that `agy` still runs its *own* internal agent loop and may use
-        its own tools during a run; those are invisible to DeerFlow and are
-        not reported back as LangChain tool calls.
+        Caveats vs a native implementation:
+        - one tool call per turn (no parallel calls)
+        - prompt-constrained JSON is less reliable than a real API contract
+        - agy prepends its own large system context to every call, so each
+          turn carries meaningful token overhead
         """
-        raise NotImplementedError(
-            "AntigravityChatModel does not support tool calling: `agy -p` returns "
-            "plain text, not structured tool calls. Select it only for text-only "
-            "roles (titles, memory, suggestions, tool-free chat), or use a "
-            "tool-capable model for the lead agent."
-        )
+        formatted = [convert_to_openai_tool(tool) for tool in tools]
+        return self.bind(tools=formatted, **kwargs)
 
-    def _build_command(self, prompt: str) -> list[str]:
+    def _build_command(
+        self,
+        prompt: str,
+        json_schema: dict[str, Any] | None = None,
+        force_plan_mode: bool = False,
+    ) -> list[str]:
         binary = shutil.which(self.agy_binary) or self.agy_binary
         cmd = [binary, "-p", prompt, "--output-format", "json"]
         if self.model:
@@ -205,8 +320,14 @@ class AntigravityChatModel(BaseChatModel):
             cmd += ["--effort", self.effort]
         if self.agent:
             cmd += ["--agent", self.agent]
-        if self.mode:
-            cmd += ["--mode", self.mode]
+        # Plan mode is mandatory for tool-calling turns: it's what keeps agy
+        # proposing instead of executing its own tools (which headless mode
+        # can't approve, producing status=CANCELED).
+        mode = "plan" if force_plan_mode else self.mode
+        if mode:
+            cmd += ["--mode", mode]
+        if json_schema is not None:
+            cmd += ["--json-schema", json.dumps(json_schema)]
         if self.dangerously_skip_permissions:
             cmd += ["--dangerously-skip-permissions"]
         for d in self.add_dirs:
@@ -215,8 +336,13 @@ class AntigravityChatModel(BaseChatModel):
             cmd += ["--print-timeout", self.print_timeout]
         return cmd
 
-    def _run_agy(self, prompt: str) -> dict[str, Any]:
-        cmd = self._build_command(prompt)
+    def _run_agy(
+        self,
+        prompt: str,
+        json_schema: dict[str, Any] | None = None,
+        force_plan_mode: bool = False,
+    ) -> dict[str, Any]:
+        cmd = self._build_command(prompt, json_schema=json_schema, force_plan_mode=force_plan_mode)
         try:
             proc = subprocess.run(
                 cmd,
@@ -299,28 +425,65 @@ class AntigravityChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        prompt = _flatten_messages(messages, max_chars=self.max_prompt_chars)
-        data = self._run_agy(prompt)
-        text = data.get("response", "")
+        tools: list[dict[str, Any]] = kwargs.get("tools") or []
+
+        conversation = _flatten_messages(messages, max_chars=self.max_prompt_chars)
+
+        if tools:
+            preamble = _TOOL_PROMPT_PREAMBLE.format(
+                tool_descriptions=_describe_tools(tools)
+            )
+            # Budget the conversation so preamble + history still fits argv.
+            room = max(1000, self.max_prompt_chars - len(preamble) - 100)
+            conversation = _flatten_messages(messages, max_chars=room)
+            prompt = f"{preamble}\n\n{conversation}"
+            data = self._run_agy(
+                prompt,
+                json_schema=_TOOL_ENVELOPE_SCHEMA,
+                force_plan_mode=True,
+            )
+        else:
+            prompt = conversation
+            data = self._run_agy(prompt)
 
         usage = data.get("usage") or {}
-        message = AIMessage(
-            content=text,
-            usage_metadata={
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "total_tokens": usage.get(
-                    "total_tokens",
-                    usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
-                ),
-            },
-            response_metadata={
-                "conversation_id": data.get("conversation_id"),
-                "duration_seconds": data.get("duration_seconds"),
-                "num_turns": data.get("num_turns"),
-                "model_name": self.model,
-            },
-        )
+        usage_metadata = {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get(
+                "total_tokens",
+                usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            ),
+        }
+        response_metadata = {
+            "conversation_id": data.get("conversation_id"),
+            "duration_seconds": data.get("duration_seconds"),
+            "num_turns": data.get("num_turns"),
+            "model_name": self.model,
+        }
+
+        if tools:
+            # `structured_output` is agy's pre-parsed, schema-conforming object.
+            # Prefer it over `response`, which carries duplicated blobs and
+            # extra keys (toolAction/toolSummary) that aren't in our schema.
+            structured = data.get("structured_output")
+            if not isinstance(structured, dict):
+                structured = _extract_structured_fallback(data.get("response", ""))
+            if structured is None:
+                raise RuntimeError(
+                    "agy returned no structured_output for a tool-calling turn; "
+                    f"raw response: {str(data.get('response'))[:400]!r}"
+                )
+            message = _parse_tool_envelope(structured)
+            message.usage_metadata = usage_metadata
+            message.response_metadata = response_metadata
+        else:
+            message = AIMessage(
+                content=data.get("response", ""),
+                usage_metadata=usage_metadata,
+                response_metadata=response_metadata,
+            )
+
         return ChatResult(generations=[ChatGeneration(message=message)])
 
     async def _agenerate(
