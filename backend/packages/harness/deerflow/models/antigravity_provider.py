@@ -49,19 +49,20 @@ import logging
 import shutil
 import subprocess
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
+    AIMessageChunk,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import Runnable
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
@@ -217,6 +218,116 @@ def _describe_tools(tools: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "- (none)"
 
 
+def _find_resumable_conversation(
+    messages: list[BaseMessage],
+) -> tuple[str | None, list[BaseMessage]]:
+    """Find the newest agy conversation to resume, plus the turns since it.
+
+    Each reply stores its ``conversation_id`` in ``response_metadata``, and
+    DeerFlow's checkpointer persists that with the thread. So on the next
+    call we can hand agy ``--conversation <id>`` and send *only* what has
+    happened since, instead of re-flattening the whole history — agy still
+    holds the context server-side.
+
+    Verified against agy 1.1.20: resuming by id in a brand-new process
+    continued the same conversation (step_index picked up where the previous
+    process left off) and answered from prior context.
+
+    Returns ``(conversation_id, messages_to_send)``. With no resumable id the
+    id is ``None`` and the full history is returned.
+    """
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, AIMessage):
+            conversation_id = (message.response_metadata or {}).get("conversation_id")
+            if conversation_id:
+                return str(conversation_id), messages[index + 1 :]
+    return None, list(messages)
+
+
+def _parse_event_stream(stdout: str) -> dict[str, Any]:
+    """Collapse agy's NDJSON event stream into a single result envelope.
+
+    Event shapes (agy 1.1.20):
+      {"event":"init","conversation_id":...,"init":{...}}
+      {"event":"step_update","step_update":{"step_type":"agent_response",
+                                            "text_delta":"...","usage":{...}}}
+      {"event":"result","result":{"status":...,"response":...,"usage":{...}}}
+
+    The final ``result`` is authoritative for status/response/usage, but its
+    ``duration_seconds`` is cumulative for the whole conversation, so per-turn
+    timing is taken from the last ``agent_response`` step instead.
+
+    A bare envelope with no ``event`` wrapper is also accepted, so the parser
+    still works against ``--output-format json`` (and would survive agy
+    dropping back to that shape).
+    """
+    conversation_id: str | None = None
+    result: dict[str, Any] = {}
+    deltas: list[str] = []
+    turn_duration: float | None = None
+    parsed_any = False
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        parsed_any = True
+
+        kind = event.get("event")
+        if kind == "init":
+            conversation_id = event.get("conversation_id") or conversation_id
+        elif kind == "step_update":
+            step = event.get("step_update") or {}
+            if step.get("step_type") == "agent_response":
+                delta = step.get("text_delta")
+                if delta:
+                    deltas.append(delta)
+                if step.get("duration_seconds") is not None:
+                    turn_duration = step.get("duration_seconds")
+        elif kind == "result":
+            payload = event.get("result")
+            if isinstance(payload, dict):
+                result = payload
+                conversation_id = payload.get("conversation_id") or conversation_id
+        elif kind is None and "status" in event:
+            # Bare envelope with no event wrapper — what `--output-format json`
+            # emits. Accepted so the parser still works if agy falls back to
+            # that shape (or a future release changes the wrapper).
+            result = event
+            conversation_id = event.get("conversation_id") or conversation_id
+
+    if not result:
+        if not parsed_any:
+            # Nothing on stdout parsed as JSON at all — a crash, a version
+            # whose output shape isn't NDJSON, or garbage. Distinct from a
+            # well-formed stream that simply never reached a result event
+            # (e.g. cancelled mid-run), which still deserves the real error
+            # text below rather than this generic one.
+            result = {
+                "status": "ERROR",
+                "error": "agy produced no parseable JSON output",
+                "response": "".join(deltas),
+            }
+        else:
+            # No result event (crash mid-stream, or cancelled before one was
+            # emitted) but at least some lines were valid JSON.
+            result = {"status": "ERROR", "response": "".join(deltas)}
+
+    result.setdefault("conversation_id", conversation_id)
+    if not result.get("response") and deltas:
+        result["response"] = "".join(deltas)
+    if turn_duration is not None:
+        result["turn_duration_seconds"] = turn_duration
+    return result
+
+
 def _extract_structured_fallback(response: str) -> dict[str, Any] | None:
     """Recover the envelope from `response` when `structured_output` is absent.
 
@@ -273,6 +384,10 @@ class AntigravityChatModel(BaseChatModel):
     print_timeout: str = "5m"
     subprocess_timeout_seconds: int = DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
     max_prompt_chars: int = DEFAULT_MAX_PROMPT_CHARS
+    # Resume agy's own conversation via --conversation instead of replaying
+    # the thread each turn. Set false to force full-history replay (useful if
+    # agy's stored conversations are pruned or you want strict statelessness).
+    resume_conversations: bool = True
 
     # `agy` accepts no sampling params (temperature/max_tokens/etc.) over the
     # CLI, so silently ignore any such keys a shared config profile might
@@ -308,12 +423,26 @@ class AntigravityChatModel(BaseChatModel):
 
     def _build_command(
         self,
-        prompt: str,
         json_schema: dict[str, Any] | None = None,
         force_plan_mode: bool = False,
+        resume_conversation_id: str | None = None,
     ) -> list[str]:
+        """Build the agy invocation.
+
+        The prompt travels on stdin as NDJSON rather than argv, which removes
+        the kernel's per-argument size limit entirely (the old `-p <prompt>`
+        form hit E2BIG on long histories) and unlocks incremental output.
+        """
         binary = shutil.which(self.agy_binary) or self.agy_binary
-        cmd = [binary, "-p", prompt, "--output-format", "json"]
+        cmd = [
+            binary,
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ]
+        if resume_conversation_id:
+            cmd += ["--conversation", resume_conversation_id]
         if self.model:
             cmd += ["--model", self.model]
         if self.effort:
@@ -336,25 +465,50 @@ class AntigravityChatModel(BaseChatModel):
             cmd += ["--print-timeout", self.print_timeout]
         return cmd
 
+    @staticmethod
+    def _encode_stdin(prompt: str) -> str:
+        """Encode one user turn as agy's NDJSON input envelope.
+
+        Exactly one message per call: agy runs a turn per input line, so
+        sending several would produce several responses when LangChain
+        expects one.
+        """
+        return (
+            json.dumps(
+                {
+                    "event": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                    },
+                }
+            )
+            + "\n"
+        )
+
     def _run_agy(
         self,
         prompt: str,
         json_schema: dict[str, Any] | None = None,
         force_plan_mode: bool = False,
+        resume_conversation_id: str | None = None,
     ) -> dict[str, Any]:
-        cmd = self._build_command(prompt, json_schema=json_schema, force_plan_mode=force_plan_mode)
+        cmd = self._build_command(
+            json_schema=json_schema,
+            force_plan_mode=force_plan_mode,
+            resume_conversation_id=resume_conversation_id,
+        )
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.subprocess_timeout_seconds,
-                # CRITICAL: without this agy inherits the gateway's stdin. When
-                # its cached credentials are missing/expired it prints an OAuth
-                # URL and blocks on "paste the authorization code here", hanging
-                # the call until the timeout. With stdin closed it instead exits
-                # non-zero and emits a clean JSON error envelope.
-                stdin=subprocess.DEVNULL,
+                # The turn is written to stdin (and the pipe then closed), so
+                # agy can never block waiting on an interactive answer — an
+                # unauthenticated run exits with a clean JSON error envelope
+                # instead of hanging on "paste the authorization code here".
+                input=self._encode_stdin(prompt),
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
@@ -379,18 +533,15 @@ class AntigravityChatModel(BaseChatModel):
                 ) from exc
             raise
 
-        # Parse stdout FIRST: agy emits a structured JSON error envelope even on
-        # non-zero exit (e.g. {"status": "ERROR", "error": "authentication
-        # failed or timed out"}). Surfacing that beats dumping raw stderr, which
-        # for auth failures is a wall of OAuth URL.
+        # Parse stdout FIRST: agy reports failures inside the event stream
+        # (e.g. a result event carrying {"status":"ERROR","error":
+        # "authentication failed or timed out"}) even when the exit code is
+        # non-zero. Surfacing that beats dumping raw stderr, which for auth
+        # failures is a wall of OAuth URL.
         data: dict[str, Any] | None = None
         if proc.stdout.strip():
-            try:
-                parsed = json.loads(proc.stdout)
-                if isinstance(parsed, dict):
-                    data = parsed
-            except json.JSONDecodeError:
-                data = None
+            parsed = _parse_event_stream(proc.stdout)
+            data = parsed or None
 
         if data is not None and data.get("status") != "SUCCESS":
             agy_error = str(data.get("error") or "").strip()
@@ -418,6 +569,42 @@ class AntigravityChatModel(BaseChatModel):
 
         return data
 
+    def _prepare_turn(
+        self,
+        messages: list[BaseMessage],
+        tools: list[dict[str, Any]],
+    ) -> tuple[str, str | None]:
+        """Build this turn's prompt and decide whether to resume a session.
+
+        When a prior reply left a ``conversation_id`` in the thread, agy still
+        holds that context server-side, so we resume it and send only what has
+        happened since — typically one human message or a tool result. That
+        keeps per-turn input near agy's fixed base cost instead of growing
+        with the thread. Falls back to the flattened history when there is
+        nothing to resume (new thread, or replies predating this provider).
+        """
+        resume_id: str | None = None
+        to_send: list[BaseMessage] = list(messages)
+
+        if self.resume_conversations:
+            candidate, since = _find_resumable_conversation(messages)
+            if candidate and since:
+                resume_id = candidate
+                to_send = since
+            # If there's a conversation but nothing new to send, fall through
+            # and replay the history rather than resuming with an empty turn.
+
+        preamble = ""
+        if tools:
+            preamble = _TOOL_PROMPT_PREAMBLE.format(
+                tool_descriptions=_describe_tools(tools)
+            )
+
+        room = max(1000, self.max_prompt_chars - len(preamble) - 100)
+        body = _flatten_messages(to_send, max_chars=room)
+        prompt = f"{preamble}\n\n{body}" if preamble else body
+        return prompt, resume_id
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -426,25 +613,13 @@ class AntigravityChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         tools: list[dict[str, Any]] = kwargs.get("tools") or []
-
-        conversation = _flatten_messages(messages, max_chars=self.max_prompt_chars)
-
-        if tools:
-            preamble = _TOOL_PROMPT_PREAMBLE.format(
-                tool_descriptions=_describe_tools(tools)
-            )
-            # Budget the conversation so preamble + history still fits argv.
-            room = max(1000, self.max_prompt_chars - len(preamble) - 100)
-            conversation = _flatten_messages(messages, max_chars=room)
-            prompt = f"{preamble}\n\n{conversation}"
-            data = self._run_agy(
-                prompt,
-                json_schema=_TOOL_ENVELOPE_SCHEMA,
-                force_plan_mode=True,
-            )
-        else:
-            prompt = conversation
-            data = self._run_agy(prompt)
+        prompt, resume_id = self._prepare_turn(messages, tools)
+        data = self._run_agy(
+            prompt,
+            json_schema=_TOOL_ENVELOPE_SCHEMA if tools else None,
+            force_plan_mode=bool(tools),
+            resume_conversation_id=resume_id,
+        )
 
         usage = data.get("usage") or {}
         usage_metadata = {
@@ -498,4 +673,128 @@ class AntigravityChatModel(BaseChatModel):
         # blocked for the duration.
         return await asyncio.to_thread(
             self._generate, messages, stop, run_manager, **kwargs
+        )
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """Stream tokens as agy emits them.
+
+        agy's stream-json output carries incremental text on
+        ``step_update`` events whose ``step_type`` is ``agent_response``, so
+        we read stdout line by line and yield each ``text_delta`` instead of
+        waiting for the run to finish.
+
+        Tool-calling turns are not streamed: the reply is a single JSON
+        envelope that is only meaningful once complete, so partial deltas
+        would be unparseable. Those fall back to a buffered generate.
+        """
+        tools: list[dict[str, Any]] = kwargs.get("tools") or []
+        if tools:
+            result = self._generate(messages, stop, run_manager, **kwargs)
+            message = result.generations[0].message
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=message.content,
+                    tool_calls=getattr(message, "tool_calls", []) or [],
+                    usage_metadata=getattr(message, "usage_metadata", None),
+                    response_metadata=getattr(message, "response_metadata", {}) or {},
+                )
+            )
+            yield chunk
+            return
+
+        prompt, resume_id = self._prepare_turn(messages, tools)
+        cmd = self._build_command(resume_conversation_id=resume_id)
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                f"agy binary not found (looked for '{self.agy_binary}')."
+            ) from exc
+
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(self._encode_stdin(prompt))
+        proc.stdin.close()
+
+        final: dict[str, Any] = {}
+        conversation_id: str | None = None
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+
+                kind = event.get("event")
+                if kind == "init":
+                    conversation_id = event.get("conversation_id") or conversation_id
+                elif kind == "step_update":
+                    step = event.get("step_update") or {}
+                    if step.get("step_type") == "agent_response":
+                        delta = step.get("text_delta")
+                        if delta:
+                            chunk = ChatGenerationChunk(
+                                message=AIMessageChunk(content=delta)
+                            )
+                            if run_manager:
+                                run_manager.on_llm_new_token(delta, chunk=chunk)
+                            yield chunk
+                elif kind == "result":
+                    payload = event.get("result")
+                    if isinstance(payload, dict):
+                        final = payload
+                        conversation_id = (
+                            payload.get("conversation_id") or conversation_id
+                        )
+        finally:
+            proc.wait(timeout=self.subprocess_timeout_seconds)
+
+        if final.get("status") not in (None, "SUCCESS"):
+            agy_error = str(final.get("error") or "").strip()
+            if "auth" in agy_error.lower():
+                raise RuntimeError(
+                    f"agy authentication failed ({agy_error}). Run `agy` "
+                    "interactively in this container to sign in; the "
+                    "credential dir (~/.gemini) must persist across rebuilds."
+                )
+            raise RuntimeError(f"agy run did not succeed: {agy_error or final}")
+
+        # Final empty chunk carries usage + the conversation id that the next
+        # turn resumes from — without it the thread would restart each time.
+        usage = final.get("usage") or {}
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content="",
+                usage_metadata={
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                    "total_tokens": usage.get(
+                        "total_tokens",
+                        usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                    ),
+                },
+                response_metadata={
+                    "conversation_id": conversation_id,
+                    "num_turns": final.get("num_turns"),
+                    "model_name": self.model,
+                },
+            )
         )
