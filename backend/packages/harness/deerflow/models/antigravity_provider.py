@@ -396,8 +396,19 @@ def _extract_structured_fallback(response: str) -> dict[str, Any] | None:
     return None
 
 
-def _parse_tool_envelope(structured: dict[str, Any]) -> AIMessage:
-    """Translate agy's structured_output envelope into a LangChain AIMessage."""
+_MAX_ENVELOPE_DEPTH = 3
+
+
+def _parse_tool_envelope(structured: dict[str, Any], _depth: int = 0) -> AIMessage:
+    """Translate agy's structured_output envelope into a LangChain AIMessage.
+
+    Envelopes are sometimes double-wrapped: agy answers the schema
+    instruction with ``{"type": "text", "text": "<a tool_call envelope>"}``,
+    burying the real call one level down. Unwrapping only once would hand
+    that inner JSON back as prose — the tool would never run and the user
+    would see raw JSON. So a text envelope whose text is itself an envelope
+    is unwrapped again, bounded by ``_MAX_ENVELOPE_DEPTH``.
+    """
     if structured.get("type") == "tool_call":
         name = structured.get("tool_name") or ""
         args = structured.get("tool_arguments")
@@ -416,7 +427,13 @@ def _parse_tool_envelope(structured: dict[str, Any]) -> AIMessage:
                 ],
             )
         logger.warning("agy returned type=tool_call with no tool_name: %s", structured)
-    return AIMessage(content=structured.get("text") or "")
+
+    text = structured.get("text") or ""
+    if _depth < _MAX_ENVELOPE_DEPTH:
+        inner = _extract_structured_fallback(text)
+        if inner is not None and inner != structured:
+            return _parse_tool_envelope(inner, _depth + 1)
+    return AIMessage(content=text)
 
 
 class AntigravityChatModel(BaseChatModel):
@@ -851,17 +868,19 @@ class AntigravityChatModel(BaseChatModel):
                 )
             raise RuntimeError(f"agy run did not succeed: {agy_error or final}")
 
-        if buffering:
-            # The reply was held back because it might have been an envelope.
-            # Prefer agy's own parsed object, fall back to parsing the text,
-            # and emit the unwrapped result as a single chunk. If it turns out
-            # not to be an envelope after all, release the text verbatim so
-            # nothing is ever silently dropped.
+        if buffering is not False:
+            # Either the reply was held back because it might have been an
+            # envelope, or nothing was streamed at all (`buffering` is still
+            # None) because agy returned the text only on the final result.
+            # Both cases have emitted nothing so far, so the reply is
+            # released here. Prefer agy's own parsed object, fall back to
+            # parsing the text, and emit the unwrapped result as one chunk.
+            # If it turns out not to be an envelope, release the text
+            # verbatim so nothing is ever silently dropped.
+            pending = final.get("response") or accumulated
             structured = final.get("structured_output")
             if not isinstance(structured, dict):
-                structured = _extract_structured_fallback(
-                    final.get("response") or accumulated
-                )
+                structured = _extract_structured_fallback(pending)
             if structured is not None:
                 unwrapped = _parse_tool_envelope(structured)
                 yield ChatGenerationChunk(
@@ -870,9 +889,9 @@ class AntigravityChatModel(BaseChatModel):
                         tool_calls=getattr(unwrapped, "tool_calls", []) or [],
                     )
                 )
-            elif accumulated:
+            elif pending:
                 yield ChatGenerationChunk(
-                    message=AIMessageChunk(content=accumulated)
+                    message=AIMessageChunk(content=pending)
                 )
 
         # Final empty chunk carries usage + the conversation id that the next
