@@ -328,22 +328,70 @@ def _parse_event_stream(stdout: str) -> dict[str, Any]:
     return result
 
 
-def _extract_structured_fallback(response: str) -> dict[str, Any] | None:
-    """Recover the envelope from `response` when `structured_output` is absent.
+_ENVELOPE_TYPES = frozenset({"text", "tool_call"})
 
-    agy normally supplies a parsed `structured_output`, but its `response`
-    field has been observed carrying several concatenated JSON objects (the
-    schema-shaped one plus a chattier variant with toolAction/toolSummary).
-    Scan lines from the end and return the first that looks like our envelope,
-    so a renamed/missing field in a future agy release degrades gracefully
-    instead of breaking the turn outright.
+
+def _strip_code_fence(text: str) -> str:
+    """Drop a ```json ... ``` wrapper, which agy sometimes adds around JSON."""
+    stripped = (text or "").strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) < 2:
+        return stripped
+    body = lines[1:]
+    if body and body[-1].strip().startswith("```"):
+        body = body[:-1]
+    return "\n".join(body).strip()
+
+
+def _is_envelope(candidate: Any) -> bool:
+    return (
+        isinstance(candidate, dict)
+        and candidate.get("type") in _ENVELOPE_TYPES
+    )
+
+
+def looks_like_envelope_start(text: str) -> bool:
+    """Could this partial reply still turn out to be an envelope?
+
+    Used by the streaming path to decide whether to hold deltas back. Prose
+    never starts with `{` or a code fence, so the check costs normal replies
+    nothing while catching every envelope before it reaches the user.
     """
-    for line in reversed([ln.strip() for ln in (response or "").splitlines() if ln.strip()]):
+    stripped = (text or "").lstrip()
+    return stripped.startswith("{") or stripped.startswith("```")
+
+
+def _extract_structured_fallback(response: str) -> dict[str, Any] | None:
+    """Recover the envelope from a raw `response` string.
+
+    agy normally supplies a parsed `structured_output`, but the envelope has
+    also been observed arriving only as text: pretty-printed across several
+    lines, wrapped in a ```json fence, or as several concatenated JSON objects
+    (the schema-shaped one plus a chattier variant with toolAction/
+    toolSummary). Try the whole payload first, then fall back to scanning
+    lines from the end, so a renamed/missing field in a future agy release
+    degrades gracefully instead of breaking the turn.
+    """
+    body = _strip_code_fence(response)
+    if not body:
+        return None
+
+    try:
+        whole = json.loads(body)
+    except json.JSONDecodeError:
+        pass
+    else:
+        if _is_envelope(whole):
+            return whole
+
+    for line in reversed([ln.strip() for ln in body.splitlines() if ln.strip()]):
         try:
             candidate = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict) and "type" in candidate:
+        if _is_envelope(candidate):
             return candidate
     return None
 
@@ -653,11 +701,25 @@ class AntigravityChatModel(BaseChatModel):
             message.usage_metadata = usage_metadata
             message.response_metadata = response_metadata
         else:
-            message = AIMessage(
-                content=data.get("response", ""),
-                usage_metadata=usage_metadata,
-                response_metadata=response_metadata,
-            )
+            # No tools bound on *this* call, but the reply may still be an
+            # envelope: the schema instruction lives in agy's conversation,
+            # and a resumed turn inherits it even when the current call did
+            # not re-send it. Unwrap opportunistically so envelope JSON is
+            # never rendered to the user as if it were prose.
+            raw = data.get("response", "")
+            structured = data.get("structured_output")
+            if not isinstance(structured, dict):
+                structured = _extract_structured_fallback(raw)
+            if structured is not None:
+                message = _parse_tool_envelope(structured)
+                message.usage_metadata = usage_metadata
+                message.response_metadata = response_metadata
+            else:
+                message = AIMessage(
+                    content=raw,
+                    usage_metadata=usage_metadata,
+                    response_metadata=response_metadata,
+                )
 
         return ChatResult(generations=[ChatGeneration(message=message)])
 
@@ -731,6 +793,14 @@ class AntigravityChatModel(BaseChatModel):
 
         final: dict[str, Any] = {}
         conversation_id: str | None = None
+        # A resumed conversation can still be under the envelope instruction
+        # from an earlier tool-bound turn, so a reply may arrive as JSON even
+        # though this call bound no tools. Deltas cannot be un-yielded, so
+        # hold them back as soon as the reply looks like it might be an
+        # envelope and decide once the text is complete. Prose never starts
+        # with `{` or a fence, so normal replies stream unaffected.
+        accumulated = ""
+        buffering: bool | None = None
         try:
             for line in proc.stdout:
                 line = line.strip()
@@ -751,12 +821,16 @@ class AntigravityChatModel(BaseChatModel):
                     if step.get("step_type") == "agent_response":
                         delta = step.get("text_delta")
                         if delta:
-                            chunk = ChatGenerationChunk(
-                                message=AIMessageChunk(content=delta)
-                            )
-                            if run_manager:
-                                run_manager.on_llm_new_token(delta, chunk=chunk)
-                            yield chunk
+                            accumulated += delta
+                            if buffering is None and accumulated.strip():
+                                buffering = looks_like_envelope_start(accumulated)
+                            if buffering is False:
+                                chunk = ChatGenerationChunk(
+                                    message=AIMessageChunk(content=delta)
+                                )
+                                if run_manager:
+                                    run_manager.on_llm_new_token(delta, chunk=chunk)
+                                yield chunk
                 elif kind == "result":
                     payload = event.get("result")
                     if isinstance(payload, dict):
@@ -776,6 +850,30 @@ class AntigravityChatModel(BaseChatModel):
                     "credential dir (~/.gemini) must persist across rebuilds."
                 )
             raise RuntimeError(f"agy run did not succeed: {agy_error or final}")
+
+        if buffering:
+            # The reply was held back because it might have been an envelope.
+            # Prefer agy's own parsed object, fall back to parsing the text,
+            # and emit the unwrapped result as a single chunk. If it turns out
+            # not to be an envelope after all, release the text verbatim so
+            # nothing is ever silently dropped.
+            structured = final.get("structured_output")
+            if not isinstance(structured, dict):
+                structured = _extract_structured_fallback(
+                    final.get("response") or accumulated
+                )
+            if structured is not None:
+                unwrapped = _parse_tool_envelope(structured)
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=unwrapped.content,
+                        tool_calls=getattr(unwrapped, "tool_calls", []) or [],
+                    )
+                )
+            elif accumulated:
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(content=accumulated)
+                )
 
         # Final empty chunk carries usage + the conversation id that the next
         # turn resumes from — without it the thread would restart each time.
