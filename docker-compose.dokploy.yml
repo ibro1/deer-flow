@@ -4,6 +4,11 @@ services:
       container_name: deerflow-codeserver
       expose:
         - "8080"
+        # Browser MCP (streamable HTTP). expose, not ports: it stays reachable
+        # only on deer-flow-network, so nginx's bearer gate at /mcp/browser is
+        # the entire external surface. Publishing it to the host would hand out
+        # unauthenticated control of a signed-in browser.
+        - "8100"
       security_opt:
         - seccomp:unconfined
       shm_size: "8gb"
@@ -21,6 +26,11 @@ services:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/deerflow-state:/mnt/deerflow-state
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/run-patched.sh:/opt/gem/run.sh
+        # The signed-in Chromium profile the YouTube cookie exporter reads.
+        # Without this it lives in the container's writable layer, so every
+        # redeploy silently logs the account out and the cookie endpoint keeps
+        # serving a jar that no longer authenticates.
+        - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/chromium-profile:/home/gem/.config/chromium
       restart: unless-stopped
       networks:
         - deer-flow-network
