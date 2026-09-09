@@ -12,9 +12,9 @@ services:
       security_opt:
         - seccomp:unconfined
       shm_size: "8gb"
-      mem_limit: "16g"
-      memswap_limit: "16g"
-      cpus: "4"
+      mem_limit: "28g"
+      memswap_limit: "32g"
+      cpus: "6"
       extra_hosts:
         - "host.docker.internal:host-gateway"
       environment:
