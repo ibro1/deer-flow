@@ -21,6 +21,12 @@ services:
         - TZ=Africa/Lagos
         - WORKSPACE=/home/gem
         - NPM_CONFIG_PREFIX=/mnt/shared/.npm-global
+        # Webshare rotating proxy for the sandbox browser (Chrome + all outbound
+        # network traffic in the container). Value is read from Dokploy's
+        # environment panel as WEBSHARE_PROXY_URL — never hardcode the
+        # username/password here, this file is git-tracked.
+        # Format: http://<user>:<pass>@<host>:<port>
+        - PROXY_SERVER=${WEBSHARE_PROXY_URL}
       volumes:
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace/skills:/mnt/skills:ro
         - /etc/dokploy/compose/projects-deeflow-hlwseh/files/shared-workspace:/mnt/shared
