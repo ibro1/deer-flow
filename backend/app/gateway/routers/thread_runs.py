@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 
 from app.gateway.artifact_archive import ArtifactArchiveError, ArtifactArchiveResult, build_artifact_archive
 from app.gateway.authz import require_cancel_permission_if, require_permission
+from deerflow.runtime.steer import MAX_STEER_CHARS, SteerMessage, get_steer_inbox
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -1232,6 +1233,33 @@ async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResp
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return _record_to_response(record)
+
+
+class SteerRequest(BaseModel):
+    """A user message for the run that is streaming on the thread."""
+
+    text: str = Field(min_length=1, max_length=MAX_STEER_CHARS)
+    steer_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+@router.post("/{thread_id}/steer", status_code=202)
+@require_permission("runs", "create", owner_check=True, require_existing=True)
+async def steer_run(thread_id: ThreadId, body: SteerRequest, request: Request) -> dict:
+    """Deliver a user message into the thread's streaming run at its next step.
+
+    Accepted only while a run of the thread executes on this worker; the lead
+    agent's SteerMiddleware reads it before the next model call (or, after a
+    final answer, sends the turn back to the model). Otherwise 409, and the
+    client sends the message as a new turn when the run ends.
+    """
+    if not body.text.strip():
+        raise HTTPException(status_code=422, detail="Steer text is empty")
+    record = await get_run_manager(request).local_running_run(thread_id)
+    if record is None:
+        raise HTTPException(status_code=409, detail="No run of this thread is streaming on this worker")
+    if not get_steer_inbox().put(thread_id, record.run_id, SteerMessage(steer_id=body.steer_id, text=body.text)):
+        raise HTTPException(status_code=429, detail="Too many steers are waiting for this run")
+    return {"accepted": True, "run_id": record.run_id}
 
 
 @router.post("/{thread_id}/runs/{run_id}/cancel")

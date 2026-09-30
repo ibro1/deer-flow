@@ -285,6 +285,20 @@ function buildHiddenConversationQuoteMessage({
   } as Message;
 }
 
+/** Client ids of the steers the thread already holds. */
+function deliveredSteerIds(messages: readonly Message[]): Set<string> {
+  const delivered = new Set<string>();
+  for (const message of messages) {
+    const steerId = (
+      message.additional_kwargs as { steer_id?: unknown } | undefined
+    )?.steer_id;
+    if (typeof steerId === "string") {
+      delivered.add(steerId);
+    }
+  }
+  return delivered;
+}
+
 export function InputBox({
   className,
   disabled,
@@ -482,8 +496,16 @@ export function InputBox({
   // thread at a time, so they wait here and go out one by one as each turn
   // finishes. A turn the user stopped, or one that failed, sends nothing: the
   // queue stays for the user to send or drop by hand.
+  // An item is "steering" once the backend accepted it into the running turn
+  // (it leaves the list when it shows up in the thread), or "queued" to go
+  // out as the next turn.
   const [queuedMessages, setQueuedMessages] = useState<
-    { id: number; message: PromptInputMessage }[]
+    {
+      id: number;
+      message: PromptInputMessage;
+      mode: "steering" | "queued";
+      steerId?: string;
+    }[]
   >([]);
   const queuedIdRef = useRef(0);
   const queueHaltedRef = useRef(false);
@@ -1376,8 +1398,55 @@ export function InputBox({
         }
         queuedIdRef.current += 1;
         const id = queuedIdRef.current;
-        setQueuedMessages((queue) => [...queue, { id, message: queuedMessage }]);
-        toast.info(t.inputBox.queuedWhileStreaming);
+        // Commands (/goal, /compact) are not conversation: they wait for the
+        // turn to end. Plain text steers the running turn.
+        const isPlainMessage =
+          getInputSubmitAction({
+            text: queuedMessage.text,
+            fileCount: 0,
+            status: "ready",
+          }).kind === "message";
+        if (!isPlainMessage || !threadId) {
+          setQueuedMessages((queue) => [
+            ...queue,
+            { id, message: queuedMessage, mode: "queued" },
+          ]);
+          toast.info(t.inputBox.queuedWhileStreaming);
+          return;
+        }
+        const steerId = `steer-${Date.now().toString(36)}-${id}`;
+        setQueuedMessages((queue) => [
+          ...queue,
+          { id, message: queuedMessage, mode: "steering", steerId },
+        ]);
+        let accepted = false;
+        try {
+          const response = await fetch(
+            `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/steer`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                text: queuedMessage.text,
+                steer_id: steerId,
+              }),
+            },
+          );
+          accepted = response.ok;
+        } catch {
+          // Network failure: the message still goes out, as the next turn.
+          accepted = false;
+        }
+        if (accepted) {
+          toast.info(t.inputBox.steerSent);
+        } else {
+          setQueuedMessages((queue) =>
+            queue.map((item) =>
+              item.id === id ? { ...item, mode: "queued" } : item,
+            ),
+          );
+          toast.info(t.inputBox.queuedWhileStreaming);
+        }
         return;
       }
       abortVoiceInput();
@@ -1493,6 +1562,8 @@ export function InputBox({
       t.inputBox.pleaseWaitStreaming,
       t.inputBox.queuedWhileStreaming,
       t.inputBox.startTurnUnavailable,
+      t.inputBox.steerSent,
+      threadId,
     ],
   );
 
@@ -1516,6 +1587,20 @@ export function InputBox({
     [queuedMessages],
   );
 
+  // A steer that reached the running turn is in the thread now.
+  useEffect(() => {
+    const delivered = deliveredSteerIds(thread.messages);
+    if (delivered.size === 0) {
+      return;
+    }
+    setQueuedMessages((queue) => {
+      const kept = queue.filter(
+        (item) => !(item.steerId && delivered.has(item.steerId)),
+      );
+      return kept.length === queue.length ? queue : kept;
+    });
+  }, [thread.messages]);
+
   const dropQueued = useCallback((id: number) => {
     setQueuedMessages((queue) => queue.filter((item) => item.id !== id));
   }, []);
@@ -1532,16 +1617,30 @@ export function InputBox({
     if (!wasStreaming) {
       return;
     }
+    // Read delivery from the thread itself: the final update and the end of
+    // the stream can land in one render, before the delivery effect ran.
+    // Steers the turn ended without reading go out as the next turn instead.
+    const delivered = deliveredSteerIds(thread.messages);
+    const pending = queuedMessages
+      .filter((item) => !(item.steerId && delivered.has(item.steerId)))
+      .map((item) =>
+        item.mode === "steering" ? { ...item, mode: "queued" as const } : item,
+      );
+    setQueuedMessages(pending);
     const halted = queueHaltedRef.current || status === "error";
     queueHaltedRef.current = false;
     if (halted) {
       return;
     }
-    const next = queuedMessages[0];
+    const next = pending[0];
     if (next) {
-      sendQueued(next.id);
+      setQueuedMessages(pending.slice(1));
+      void handleSubmitRef.current(next.message).catch(() => {
+        // Put it back at the front: a failed send must not lose the text.
+        setQueuedMessages((queue) => [next, ...queue]);
+      });
     }
-  }, [status, queuedMessages, sendQueued]);
+  }, [status, queuedMessages, thread.messages]);
 
   // A queue belongs to one thread.
   useEffect(() => {
@@ -1645,11 +1744,17 @@ export function InputBox({
   const composerLocked = isComposerDisabled || polishingInput;
   // A denied runs:cancel role sees a disabled stop affordance, not a removed
   // one — the composer must still show that a turn is in flight.
-  const stopDenied = status === "streaming" && !canStopStreaming;
+  // While a turn streams, typing turns the button back into Send: the
+  // message steers the running turn (or waits in the queue). An empty
+  // composer keeps it the stop affordance.
+  const sendsDuringStream =
+    status === "streaming" && (textInput.value ?? "").trim() !== "";
+  const buttonStatus = sendsDuringStream ? "ready" : status;
+  const stopDenied = buttonStatus === "streaming" && !canStopStreaming;
   // Mirror for runs:create on the send side. While streaming the button is
   // the stop affordance (gated above), so the send denial only applies to
   // the send state.
-  const sendDenied = status !== "streaming" && !canCreateRuns;
+  const sendDenied = buttonStatus !== "streaming" && !canCreateRuns;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2516,10 +2621,15 @@ export function InputBox({
           </div>
           {queuedMessages.map((item) => (
             <div key={item.id} className="flex items-center gap-2">
+              <span className="text-muted-foreground shrink-0 text-xs">
+                {item.mode === "steering"
+                  ? t.inputBox.steeringLabel
+                  : t.inputBox.queuedLabel}
+              </span>
               <span className="min-w-0 flex-1 truncate">
                 {item.message.text}
               </span>
-              {status !== "streaming" && (
+              {status !== "streaming" && item.mode === "queued" && (
                 <button
                   type="button"
                   className="text-primary shrink-0 text-xs hover:underline"
@@ -3030,7 +3140,7 @@ export function InputBox({
               className="rounded-full"
               disabled={composerLocked || stopDenied || sendDenied}
               variant="outline"
-              status={status}
+              status={buttonStatus}
               // A bare disabled square reads as a broken composer; explain
               // the permission boundary (native title, since a Radix
               // tooltip won't fire on a disabled button). Spread
@@ -3049,7 +3159,7 @@ export function InputBox({
                     }
                   : {})}
               onClick={(e) => {
-                if (status === "streaming") {
+                if (buttonStatus === "streaming") {
                   e.preventDefault();
                   handleStopStreaming();
                 }

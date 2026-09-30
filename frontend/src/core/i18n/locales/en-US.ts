@@ -496,6 +496,9 @@ export const enUS: Translations = {
     queuedPausedTitle: "Queued: the last response was stopped or failed, so these wait for you",
     queuedSendNow: "Send now",
     queuedRemove: "Remove from queue",
+    steerSent: "Sent to the running reply. The agent reads it at its next step.",
+    steeringLabel: "Steering",
+    queuedLabel: "Queued",
     stopStreamingUnavailable:
       "Stopping the running turn is not permitted for your role.",
     startTurnUnavailable: "Starting a new turn is not permitted for your role.",

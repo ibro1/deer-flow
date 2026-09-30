@@ -1949,6 +1949,27 @@ class RunManager:
         async with self._lock:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
+    async def local_running_run(self, thread_id: str) -> RunRecord | None:
+        """Return *thread_id*'s run executing on this worker, if any.
+
+        Only a run whose task is live in this process qualifies: a steer can be
+        handed to it through the process-local inbox. A pending, finalizing,
+        aborting, or store-only (other-worker) run does not.
+        """
+        async with self._lock:
+            for record in self._thread_records_locked(thread_id):
+                if (
+                    record.operation_kind == ThreadOperationKind.run
+                    and record.status == RunStatus.running
+                    and not record.store_only
+                    and not record.finalizing
+                    and not record.abort_event.is_set()
+                    and record.task is not None
+                    and not record.task.done()
+                ):
+                    return record
+            return None
+
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
         """Remove a run record after an optional delay.
 

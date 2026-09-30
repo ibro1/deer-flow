@@ -396,6 +396,9 @@ export interface Translations {
     queuedPausedTitle: string;
     queuedSendNow: string;
     queuedRemove: string;
+    steerSent: string;
+    steeringLabel: string;
+    queuedLabel: string;
     stopStreamingUnavailable: string;
     startTurnUnavailable: string;
   };

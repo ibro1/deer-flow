@@ -645,6 +645,12 @@ def build_middlewares(
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # Deliver steers (user messages sent while the run streams) at each step,
+    # after compaction so a steer is always the newest message the model sees.
+    from deerflow.agents.middlewares.steer_middleware import SteerMiddleware
+
+    middlewares.append(SteerMiddleware())
+
     # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)
