@@ -420,6 +420,16 @@ export function InputBox({
   // Set when the user stops a streaming turn. Such a turn ends on a
   // half-finished response, so we must NOT generate follow-up suggestions for it.
   const stoppedByUserRef = useRef(false);
+  // Messages sent while a response is streaming. The backend runs one turn per
+  // thread at a time, so they wait here and go out one by one as each turn
+  // finishes. A turn the user stopped, or one that failed, sends nothing: the
+  // queue stays for the user to send or drop by hand.
+  const [queuedMessages, setQueuedMessages] = useState<
+    { id: number; message: PromptInputMessage }[]
+  >([]);
+  const queuedIdRef = useRef(0);
+  const queueHaltedRef = useRef(false);
+  const queueWasStreamingRef = useRef(false);
   const messagesRef = useRef(thread.messages);
 
   const clearVoiceRestartTimer = useCallback(() => {
@@ -1155,6 +1165,7 @@ export function InputBox({
     // Mark the in-progress turn as user-interrupted so the next
     // streaming->ready transition does not suggest follow-ups for it.
     stoppedByUserRef.current = true;
+    queueHaltedRef.current = true;
     setFollowups([]);
     setFollowupsHidden(true);
     setFollowupsLoading(false);
@@ -1164,8 +1175,23 @@ export function InputBox({
   const handleSubmit = useCallback(
     async (message: PromptInputMessage) => {
       if (status === "streaming") {
-        toast.info(t.inputBox.pleaseWaitStreaming);
-        return Promise.reject(new Error("streaming"));
+        // Attachments are not queued: their previews are released when the
+        // composer clears, so they must go with a live send.
+        if (message.files.length > 0 || !message.text.trim()) {
+          toast.info(t.inputBox.pleaseWaitStreaming);
+          return Promise.reject(new Error("streaming"));
+        }
+        const queuedMessage = selectedSlashSkill
+          ? { ...message, text: `/${selectedSlashSkill.name} ${message.text}` }
+          : message;
+        if (selectedSlashSkill) {
+          setSelectedSlashSkill(null);
+        }
+        queuedIdRef.current += 1;
+        const id = queuedIdRef.current;
+        setQueuedMessages((queue) => [...queue, { id, message: queuedMessage }]);
+        toast.info(t.inputBox.queuedWhileStreaming);
+        return;
       }
       abortVoiceInput();
       const messageWithSlashSkill = selectedSlashSkill
@@ -1234,8 +1260,62 @@ export function InputBox({
       submitThreadMessage,
       t.inputBox.goalTooLong,
       t.inputBox.pleaseWaitStreaming,
+      t.inputBox.queuedWhileStreaming,
     ],
   );
+
+  // The latest submit handler, for the queue's effect, which must not re-run
+  // whenever the handler's own dependencies change.
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
+
+  const sendQueued = useCallback(
+    (id: number) => {
+      const entry = queuedMessages.find((item) => item.id === id);
+      if (!entry) {
+        return;
+      }
+      setQueuedMessages((queue) => queue.filter((item) => item.id !== id));
+      void handleSubmitRef.current(entry.message).catch(() => {
+        // Put it back at the front: a failed send must not lose the text.
+        setQueuedMessages((queue) => [entry, ...queue]);
+      });
+    },
+    [queuedMessages],
+  );
+
+  const dropQueued = useCallback((id: number) => {
+    setQueuedMessages((queue) => queue.filter((item) => item.id !== id));
+  }, []);
+
+  // When a turn finishes normally, send the oldest queued message; its own
+  // turn finishing sends the next.
+  useEffect(() => {
+    const streaming = status === "streaming";
+    const wasStreaming = queueWasStreamingRef.current;
+    queueWasStreamingRef.current = streaming;
+    if (streaming) {
+      return;
+    }
+    if (!wasStreaming) {
+      return;
+    }
+    const halted = queueHaltedRef.current || status === "error";
+    queueHaltedRef.current = false;
+    if (halted) {
+      return;
+    }
+    const next = queuedMessages[0];
+    if (next) {
+      sendQueued(next.id);
+    }
+  }, [status, queuedMessages, sendQueued]);
+
+  // A queue belongs to one thread.
+  useEffect(() => {
+    setQueuedMessages([]);
+    queueHaltedRef.current = false;
+  }, [draftKey]);
 
   const requestFormSubmit = useCallback(() => {
     const form = promptRootRef.current?.querySelector("form");
@@ -2171,6 +2251,43 @@ export function InputBox({
               );
             })}
           </div>
+        </div>
+      )}
+      {queuedMessages.length > 0 && (
+        <div
+          className="bg-background/85 relative z-10 mb-2 flex flex-col gap-1 rounded-xl border px-3 py-2 text-sm backdrop-blur-sm"
+          aria-live="polite"
+        >
+          <div className="text-muted-foreground text-xs">
+            {status === "streaming"
+              ? t.inputBox.queuedTitle
+              : t.inputBox.queuedPausedTitle}
+          </div>
+          {queuedMessages.map((item) => (
+            <div key={item.id} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate">
+                {item.message.text}
+              </span>
+              {status !== "streaming" && (
+                <button
+                  type="button"
+                  className="text-primary shrink-0 text-xs hover:underline"
+                  onClick={() => sendQueued(item.id)}
+                >
+                  {t.inputBox.queuedSendNow}
+                </button>
+              )}
+              <button
+                type="button"
+                className="text-muted-foreground hover:text-foreground shrink-0"
+                aria-label={t.inputBox.queuedRemove}
+                title={t.inputBox.queuedRemove}
+                onClick={() => dropQueued(item.id)}
+              >
+                <XIcon className="size-3.5" />
+              </button>
+            </div>
+          ))}
         </div>
       )}
       <PromptInput

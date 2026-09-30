@@ -274,6 +274,11 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    queuedWhileStreaming: "已加入队列，将在当前回复完成后发送。",
+    queuedTitle: "队列中：当前回复完成后发送",
+    queuedPausedTitle: "队列中：上一个回复已停止或失败，等待你手动发送",
+    queuedSendNow: "立即发送",
+    queuedRemove: "从队列移除",
   },
 
   // Sidebar

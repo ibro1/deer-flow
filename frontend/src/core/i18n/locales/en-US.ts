@@ -290,6 +290,11 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    queuedWhileStreaming: "Queued. It sends when the current response finishes.",
+    queuedTitle: "Queued: sends when this response finishes",
+    queuedPausedTitle: "Queued: the last response was stopped or failed, so these wait for you",
+    queuedSendNow: "Send now",
+    queuedRemove: "Remove from queue",
   },
 
   // Sidebar

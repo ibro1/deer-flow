@@ -215,6 +215,11 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    queuedWhileStreaming: string;
+    queuedTitle: string;
+    queuedPausedTitle: string;
+    queuedSendNow: string;
+    queuedRemove: string;
   };
 
   // Sidebar
