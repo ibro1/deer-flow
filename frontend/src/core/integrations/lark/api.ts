@@ -8,6 +8,7 @@ import type {
   LarkAuthStartResponse,
   LarkConfigCompleteRequest,
   LarkConfigCompleteResponse,
+  LarkConfigCredentialsRequest,
   LarkConfigStartRequest,
   LarkConfigStartResponse,
   LarkInstallResponse,
@@ -35,9 +36,24 @@ async function readErrorDetail(response: Response): Promise<string> {
   return data.detail ?? `HTTP ${response.status}: ${response.statusText}`;
 }
 
-export async function loadLarkIntegrationStatus(): Promise<LarkIntegrationStatus> {
+function normalizeLarkIntegrationStatus(
+  status: LarkIntegrationStatus,
+): LarkIntegrationStatus {
+  // Backends predating the flag omit it entirely; an absent flag means the
+  // runtime readiness was not reported as evaluated, so default to false and
+  // let the mutation cache preserve the last authoritative runtime fields.
+  return {
+    ...status,
+    sandbox_runtime_probed: status.sandbox_runtime_probed ?? false,
+  };
+}
+
+export async function loadLarkIntegrationStatus(
+  signal?: AbortSignal,
+): Promise<LarkIntegrationStatus> {
   const response = await fetch(
     `${getBackendBaseURL()}/api/integrations/lark/status`,
+    { signal },
   );
   if (!response.ok) {
     throw new LarkIntegrationRequestError(
@@ -45,7 +61,7 @@ export async function loadLarkIntegrationStatus(): Promise<LarkIntegrationStatus
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  return normalizeLarkIntegrationStatus(await response.json());
 }
 
 export async function installLarkIntegration(): Promise<LarkInstallResponse> {
@@ -61,7 +77,8 @@ export async function installLarkIntegration(): Promise<LarkInstallResponse> {
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkInstallResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }
 
 export async function startLarkAuthorization(
@@ -127,7 +144,31 @@ export async function completeLarkConfiguration(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkConfigCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
+}
+
+export async function setLarkAppCredentials(
+  request: LarkConfigCredentialsRequest,
+): Promise<LarkConfigCompleteResponse> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/integrations/lark/config/credentials`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    },
+  );
+  if (!response.ok) {
+    throw new LarkIntegrationRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
+  }
+  const data = (await response.json()) as LarkConfigCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }
 
 export async function completeLarkAuthorization(
@@ -149,5 +190,6 @@ export async function completeLarkAuthorization(
       await readErrorDetail(response),
     );
   }
-  return response.json();
+  const data = (await response.json()) as LarkAuthCompleteResponse;
+  return { ...data, status: normalizeLarkIntegrationStatus(data.status) };
 }

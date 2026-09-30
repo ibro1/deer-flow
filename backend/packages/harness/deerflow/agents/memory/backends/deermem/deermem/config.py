@@ -18,6 +18,7 @@ DeerMem default); tracing is via the base ``MemoryManager.callbacks`` field
 from __future__ import annotations
 
 import logging
+import math
 from pathlib import Path
 from typing import Any, Literal
 
@@ -45,6 +46,9 @@ class DeerMemModelConfig(BaseModel):
 class DeerMemConfig(BaseModel):
     """DeerMem-private configuration (self-contained, host-agnostic)."""
 
+    prompt_prepend: str = Field(default="", strict=True, description="Literal operator instructions prepended to the memory-update system message")
+    prompt_append: str = Field(default="", strict=True, description="Literal operator instructions appended to the memory-update system message")
+
     # ── Storage ──────────────────────────────────────────────────────────
     storage_path: str = Field(
         default="",
@@ -52,7 +56,12 @@ class DeerMemConfig(BaseModel):
     )
     storage_class: str = Field(
         default="",
-        description="Dotted class path for an alternative storage provider; empty (default) = FileMemoryStorage (no importlib, portable).",
+        description=(
+            "Dotted class path for an alternative storage provider, or a built-in alias: "
+            "``file`` = FileMemoryStorage (default) or ``markdown`` = MarkdownMemoryStorage "
+            "(tolerant load path, same JSON on disk); empty (default) = FileMemoryStorage "
+            "(no importlib, portable)."
+        ),
     )
     strict_user_scope: bool = Field(
         default=False,
@@ -70,7 +79,55 @@ class DeerMemConfig(BaseModel):
     )
     retrieval_adapter: str = Field(
         default="fts5",
-        description="Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort.",
+        description=(
+            "Retrieval adapter factory: 'fts5' (default), an empty string to disable, or a dotted factory receiving DeerMemConfig and implementing RetrievalPort. "
+            "Search bypasses this adapter when retrieval_relevance_enabled is true; indexing remains configured."
+        ),
+    )
+    fact_dedup_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in deterministic near-duplicate gate for NEW facts (issue "
+            "#5252). When true, a proposed new fact whose bounded "
+            "token-Jaccard similarity to an existing fact in the same "
+            "user/agent scope AND category reaches "
+            "fact_dedup_similarity_threshold merges into that fact instead "
+            "of being appended: the existing id/content/createdAt are kept, "
+            "confidence is raised to max(old, new), and source is refreshed "
+            "only when confidence increases. Correction replacements and "
+            "proposed removal targets are excluded from near-dedup. "
+            "False preserves the legacy behavior exactly."
+        ),
+    )
+    fact_dedup_similarity_threshold: float = Field(
+        default=0.7,
+        ge=0.5,
+        le=1.0,
+        description=("Minimum bounded token-Jaccard similarity for the write-side near-duplicate merge gate. Used only when fact_dedup_enabled is true."),
+    )
+    retrieval_relevance_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in relevance-aware retrieval (issue #4495). When true, "
+            "search bypasses retrieval_adapter (including FTS5 and custom factories); "
+            "memory_search ranks all facts in scope by deterministic lexical "
+            "relevance combined with confidence, related facts are returned "
+            "even without a literal substring match, and prompt injection "
+            "ranks facts against the current query. False preserves the "
+            "legacy confidence-based behavior exactly."
+        ),
+    )
+    retrieval_relevance_weight: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Weight of lexical relevance vs confidence in the combined retrieval score. 0.0 = confidence only; 1.0 = relevance only. Used only when retrieval_relevance_enabled is true.",
+    )
+    retrieval_diversity_weight: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Greedy MMR similarity penalty that demotes near-duplicate facts during relevance-aware ranking. 0.0 (default) = no diversification. Used only when retrieval_relevance_enabled is true.",
     )
     # ── Queue ────────────────────────────────────────────────────────────
     debounce_seconds: int = Field(
@@ -86,6 +143,27 @@ class DeerMemConfig(BaseModel):
     )
     # ── Facts ────────────────────────────────────────────────────────────
     max_facts: int = Field(default=100, ge=10, le=500, description="Maximum number of facts to store.")
+    fact_eviction_policy: Literal["confidence", "hybrid-v1"] = Field(
+        default="confidence",
+        description=("Capacity-eviction policy. 'confidence' preserves the historical behavior; 'hybrid-v1' combines confidence, explicit-confirmation freshness, and query-driven access heat with bounded correction slots."),
+    )
+    fact_eviction_shadow_enabled: bool = Field(
+        default=False,
+        description=("When true, also compute hybrid-v1 during confidence-policy trims and include its disagreement in the metadata-only eviction audit."),
+    )
+    eviction_confidence_weight: float = Field(default=0.65, ge=0.0, le=1.0)
+    eviction_confirmation_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    eviction_access_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_confirmation_half_life_days: int = Field(default=90, ge=1, le=3650)
+    eviction_access_half_life_days: int = Field(default=30, ge=1, le=3650)
+    eviction_correction_reserved_fraction: float = Field(default=0.10, ge=0.0, le=1.0)
+    eviction_correction_reserved_max: int = Field(default=10, ge=0, le=100)
+    eviction_audit_max_entries: int = Field(
+        default=200,
+        ge=0,
+        le=10000,
+        description="Maximum metadata-only capacity-eviction audit events per user/agent scope; 0 disables the audit.",
+    )
     fact_confidence_threshold: float = Field(
         default=0.7,
         ge=0.0,
@@ -215,6 +293,17 @@ class DeerMemConfig(BaseModel):
             "post-invoke observability. Set programmatically (not from YAML)."
         ),
     )
+    # ── Memory judge (pre-screen + signal classification) ────────────────
+    judge: Any = Field(
+        default=None,
+        description=(
+            "Optional host-injected memory judge ``judge(context) -> MemoryBatchVerdict``: "
+            "decides whether this batch is worth an extraction call (pre-screening) and "
+            "supplies model hint labels (signal classification). None (default) = no judging, "
+            "leaving the extraction path byte-identical to a deployment without this feature. "
+            "Set programmatically by the host factory (not from YAML)."
+        ),
+    )
     # ── Watermark cache (in-memory, bounded LRU) ─────────────────────────
     watermark_max_keys: int = Field(
         default=4096,
@@ -298,6 +387,9 @@ class DeerMemConfig(BaseModel):
                     f"storage_path as a root DIRECTORY (per-user memory under "
                     f"{{storage_path}}/users/{{uid}}/memory.json). Point it at a directory."
                 )
+        weight_sum = self.eviction_confidence_weight + self.eviction_confirmation_weight + self.eviction_access_weight
+        if not math.isclose(weight_sum, 1.0, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("DeerMem eviction weights must sum to 1.0")
         return self
 
     @classmethod

@@ -10,7 +10,9 @@ fast, not silently fall back to defaults.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -20,6 +22,26 @@ _HOST_INJECTED_KEYS = frozenset({"storage_path", "should_keep_hidden_message"})
 _STARTUP_POLICIES = frozenset({"fail_fast", "tolerate"})
 _READ_POLICIES = frozenset({"fail_open", "fail_closed"})
 _WRITE_POLICIES = frozenset({"log_and_drop", "raise"})
+
+
+def _number[T](cfg: dict[str, Any], key: str, default: T, cast: Callable[[Any], T]) -> T:
+    """Read a numeric knob, treating a value-less key as unset.
+
+    ``top_k:`` with nothing after it in YAML arrives as ``None``, and the range
+    checks below never see it: ``int(None)`` raises ``TypeError`` from inside
+    backend construction without naming the knob or the file. A key carrying no
+    value keeps its default -- the same line ``failure_policy`` and
+    ``allow_insecure_http`` already draw -- and a value that cannot be cast is
+    reported as the config mistake it is. Numeric strings keep working, because
+    that is what ``int``/``float`` already accept.
+    """
+    value = cfg.get(key, default)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"mem0 {key} must be a number, got {type(value).__name__}") from None
 
 
 @dataclass(frozen=True)
@@ -85,10 +107,10 @@ class Mem0Config:
             api_key_env=str(cfg.get("api_key_env", "MEM0_API_KEY")),
             base_url=str(cfg.get("base_url", "https://api.mem0.ai")).rstrip("/"),
             allow_insecure_http=allow_insecure_http,
-            top_k=int(cfg.get("top_k", 8)),
-            score_threshold=float(cfg.get("score_threshold", 0.1)),
-            max_injection_chars=int(cfg.get("max_injection_chars", 12000)),
-            timeout_seconds=float(cfg.get("timeout_seconds", 10.0)),
+            top_k=_number(cfg, "top_k", 8, int),
+            score_threshold=_number(cfg, "score_threshold", 0.1, float),
+            max_injection_chars=_number(cfg, "max_injection_chars", 12000, int),
+            timeout_seconds=_number(cfg, "timeout_seconds", 10.0, float),
             startup_policy=str(cfg.get("startup_policy", "fail_fast")),
             read_policy=str(failure_policy.get("read", "fail_open")),
             write_policy=str(failure_policy.get("write", "log_and_drop")),
@@ -105,8 +127,8 @@ class Mem0Config:
             raise ValueError("mem0 score_threshold must be in [0, 1]")
         if config.max_injection_chars <= 0:
             raise ValueError("mem0 max_injection_chars must be positive")
-        if config.timeout_seconds <= 0:
-            raise ValueError("mem0 timeout_seconds must be positive")
+        if not isfinite(config.timeout_seconds) or config.timeout_seconds <= 0:
+            raise ValueError("mem0 timeout_seconds must be a finite value > 0")
         if not config.api_key_env.strip():
             raise ValueError("mem0 api_key_env must be a non-empty env var name")
         parsed_base_url = urlsplit(config.base_url)

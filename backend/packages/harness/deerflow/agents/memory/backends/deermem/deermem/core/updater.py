@@ -9,12 +9,19 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import DeerMemConfig
+from .eviction import (
+    EVICTION_POLICY_CONFIDENCE,
+    EVICTION_POLICY_HYBRID_V1,
+    FactEvictionDecision,
+    select_facts_for_capacity,
+)
 from .message_processing import detect_signals, extract_message_text
 from .prompt import (
     format_conversation_for_update,
@@ -25,6 +32,7 @@ from .storage import (
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    normalize_memory_data,
     utc_now_iso_z,
 )
 
@@ -72,20 +80,12 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def _trim_facts_to_max(facts: list[dict[str, Any]], max_facts: int) -> list[dict[str, Any]]:
-    """Keep the highest-confidence facts within ``max_facts`` (confidence coerced).
-
-    Confidence is read via :func:`_coerce_source_confidence` so legacy / imported
-    facts with ``null`` or non-numeric confidence never crash the sort -- the
-    pre-#4023 ``key=lambda f: f.get("confidence", 0)`` form compared ``None`` /
-    ``str`` against ``float`` and raised ``TypeError`` once ``len(facts) >
-    max_facts``. Mirrors upstream's ``_trim_facts_to_max`` (introduced in #4023)
-    so the vendored copy no longer lags the coercion fix the
-    monolithic->vendored rename silently dropped.
-    """
-    if len(facts) <= max_facts:
-        return facts
-    return sorted(facts, key=_coerce_source_confidence, reverse=True)[:max_facts]
+def _next_confirmation_count(fact: dict[str, Any]) -> int:
+    """Increment a valid prior confirmation count, resetting malformed values."""
+    prior_count = fact.get("confirmationCount", 0)
+    if isinstance(prior_count, bool) or not isinstance(prior_count, int) or prior_count < 0:
+        return 1
+    return prior_count + 1
 
 
 def _extract_text(content: Any) -> str:
@@ -243,6 +243,23 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
+    facts_to_reinforce = update_data.get("factsToReinforce")
+    normalized_facts_to_reinforce: list[dict[str, str]] = []
+    if isinstance(facts_to_reinforce, list):
+        for entry in facts_to_reinforce:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            scope = _normalize_gate_label(entry.get("scope"))
+            reason = entry.get("reason")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            normalized_entry = {"id": raw_id.strip()}
+            if scope is not None:
+                normalized_entry["scope"] = scope
+            if isinstance(reason, str) and reason.strip():
+                normalized_entry["reason"] = reason.strip()
+            normalized_facts_to_reinforce.append(normalized_entry)
     normalized_facts_to_remove: list[dict[str, Any]] = []
     if isinstance(facts_to_remove, list):
         for entry in facts_to_remove:
@@ -381,6 +398,7 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
         "newFacts": normalized_new_facts,
+        "factsToReinforce": normalized_facts_to_reinforce,
         "factsToRemove": normalized_facts_to_remove,
         "staleFactsToRemove": normalized_stale_removals,
         "staleFactsToExtend": normalized_stale_extensions,
@@ -417,7 +435,7 @@ _UPLOAD_SENTENCE_RE = re.compile(
     r"upload(?:ed|ing)?(?:\s+\w+){0,3}\s+(?:file|files?|document|documents?|attachment|attachments?)"
     r"|file\s+upload"
     r"|/mnt/user-data/uploads/"
-    r"|<(?:uploaded_files|current_uploads)>"
+    r"|<current_uploads>"
     r")[^.!?]*[.!?]?\s*",
     re.IGNORECASE,
 )
@@ -455,6 +473,72 @@ def _fact_content_key(content: Any) -> str | None:
     return stripped.casefold()
 
 
+_FACT_CJK_RANGE = "\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f"
+_FACT_TOKEN_RE = re.compile(rf"[a-zA-Z0-9_]+|[{_FACT_CJK_RANGE}]+(?:\s+[{_FACT_CJK_RANGE}]+)*")
+_FACT_SIMILARITY_TOKEN_BUDGET = 128
+
+
+def _fact_content_tokens(content: str) -> list[str]:
+    """Deterministic, network-free tokenization for fact similarity.
+
+    Latin words and CJK bigrams coexist in mixed-script text. Whitespace
+    between CJK runs is ignored, retaining adjacent-character order even
+    for spaced Chinese text, without joining across Latin words/punctuation.
+    """
+    lowered = content.strip().lower()
+    if not lowered:
+        return []
+    tokens: list[str] = []
+    for match in _FACT_TOKEN_RE.finditer(lowered):
+        run = match.group()
+        if run[0].isascii():
+            tokens.append(run)
+        else:
+            run = "".join(run.split())
+            tokens.extend([run] if len(run) == 1 else (run[index : index + 2] for index in range(len(run) - 1)))
+    return tokens or lowered.split()
+
+
+def _fact_content_similarity(left: str, right: str) -> float:
+    """Bounded token-Jaccard similarity over case-folded token sets."""
+    left_set = set(_fact_content_tokens(left)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    right_set = set(_fact_content_tokens(right)[:_FACT_SIMILARITY_TOKEN_BUDGET])
+    if not left_set or not right_set:
+        return 0.0
+    return len(left_set & right_set) / len(left_set | right_set)
+
+
+def _find_dedup_merge_target(
+    content: str,
+    category: str,
+    facts: list[dict[str, Any]],
+    *,
+    threshold: float,
+) -> dict[str, Any] | None:
+    """Return the most similar same-category fact at/above the similarity
+    threshold, or ``None`` (write-side near-duplicate gate, issue #5252).
+
+    Deterministic and offline: bounded token-Jaccard similarity. Only
+    candidate facts whose content is a non-empty string participate;
+    category mismatch never merges.
+    """
+    best_target: dict[str, Any] | None = None
+    best_similarity = 0.0
+    for fact in facts:
+        if not isinstance(fact, dict):
+            continue
+        candidate_content = fact.get("content")
+        if not isinstance(candidate_content, str) or not candidate_content.strip():
+            continue
+        if fact.get("category", "context") != category:
+            continue
+        similarity = _fact_content_similarity(content, candidate_content)
+        if similarity >= threshold and similarity > best_similarity:
+            best_target = fact
+            best_similarity = similarity
+    return best_target
+
+
 def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: str | None) -> None:
     """Reject a candidate fact whose normalized content already exists.
 
@@ -473,7 +557,7 @@ def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: s
 
 
 def _parse_fact_datetime(raw: str) -> datetime | None:
-    """Parse an ISO-8601 datetime string from a fact's createdAt field.
+    """Parse an ISO-8601 datetime string from a fact timestamp field.
 
     Returns ``None`` on any parse failure so callers can safely skip malformed facts.
     """
@@ -563,9 +647,11 @@ def _select_stale_candidates(
     Each fact's effective review age is determined by
     ``_effective_fact_staleness_age``: facts with an LLM-assigned
     ``expected_valid_days`` use that value directly; facts without it fall back
-    to the global ``staleness_age_days``.  Protected categories (default:
-    ``correction``) are excluded because they represent explicit user feedback
-    that should not be auto-pruned by age.
+    to the global ``staleness_age_days``. A valid ``lastConfirmedAt`` resets the
+    review clock because it is explicit evidence that the fact is still true;
+    otherwise ``createdAt`` remains the reference. Protected categories
+    (default: ``correction``) are excluded because they represent explicit user
+    feedback that should not be auto-pruned by age.
     """
     now = datetime.now(UTC)
     protected = frozenset(config.staleness_protected_categories)
@@ -576,15 +662,15 @@ def _select_stale_candidates(
         category = fact.get("category", "")
         if isinstance(category, str) and category in protected:
             continue
-        created_at = _parse_fact_datetime(fact.get("createdAt", ""))
-        if created_at is None:
+        review_reference = _parse_fact_datetime(fact.get("lastConfirmedAt", "")) or _parse_fact_datetime(fact.get("createdAt", ""))
+        if review_reference is None:
             continue
         effective_age = _effective_fact_staleness_age(fact, config)
         # now - timedelta(days=effective_age) can overflow datetime.min when
         # effective_age is a huge persisted value; a window that large means the
         # fact cannot yet be stale, so skip it rather than aborting the cycle.
         cutoff = _safe_add_days(now, -effective_age)
-        if cutoff is not None and created_at < cutoff:
+        if cutoff is not None and review_reference < cutoff:
             candidates.append(fact)
     return candidates
 
@@ -610,14 +696,14 @@ def _build_staleness_section(
         fid = fact.get("id", "?")
         cat = html.escape(str(fact.get("category", "context")).strip() or "context", quote=False)
         conf = _coerce_source_confidence(fact)
-        created_raw = fact.get("createdAt", "")
-        created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
+        review_reference = _parse_fact_datetime(fact.get("lastConfirmedAt", "")) or _parse_fact_datetime(fact.get("createdAt", ""))
+        reviewed_short = review_reference.date().isoformat() if review_reference is not None else ""
         # quote=False: content is in element-text position (inside <stale_facts>
         # tags, never an attribute value), so only <, >, & can break structure -
         # leave ' and " untouched. Mirrors the convention in prompt.py #4028.
         content = html.escape(str(fact.get("content", "")), quote=False)
         effective_age = _effective_fact_staleness_age(fact, config)
-        lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short} | valid:{effective_age}d] "{content}"')
+        lines.append(f'- [{fid} | {cat} | {conf:.2f} | {reviewed_short} | valid:{effective_age}d] "{content}"')
     return load_prompt("staleness_review", prompts_dir=prompts_dir, agent_name=agent_name).format(stale_facts="\n".join(lines))
 
 
@@ -808,23 +894,89 @@ class MemoryUpdater:
         """Reload memory data via the injected storage."""
         return self._storage.reload(agent_name, user_id=user_id)
 
-    def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
+    def _select_for_capacity(
+        self,
+        facts: list[dict[str, Any]],
+        *,
+        agent_name: str | None,
+        user_id: str | None,
+    ) -> tuple[list[dict[str, Any]], FactEvictionDecision | None, FactEvictionDecision | None]:
+        """Apply the configured policy and optionally compute hybrid shadow."""
+        if len(facts) <= self._config.max_facts:
+            return facts, None, None
+        uses_hybrid_scoring = self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled
+        usage = (
+            self._storage.get_fact_usage(
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+            if uses_hybrid_scoring and agent_name is not None
+            else {}
+        )
+        common = {
+            "max_facts": self._config.max_facts,
+            "usage": usage,
+            "confidence_weight": self._config.eviction_confidence_weight,
+            "confirmation_weight": self._config.eviction_confirmation_weight,
+            "access_weight": self._config.eviction_access_weight,
+            "confirmation_half_life_days": self._config.eviction_confirmation_half_life_days,
+            "access_half_life_days": self._config.eviction_access_half_life_days,
+            "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
+            "correction_reserved_max": self._config.eviction_correction_reserved_max,
+        }
+        decision = select_facts_for_capacity(
+            facts,
+            policy=self._config.fact_eviction_policy,
+            **common,
+        )
+        shadow_decision = None
+        if self._config.fact_eviction_shadow_enabled and self._config.fact_eviction_policy == EVICTION_POLICY_CONFIDENCE:
+            shadow_decision = select_facts_for_capacity(
+                facts,
+                policy=EVICTION_POLICY_HYBRID_V1,
+                **common,
+            )
+        return decision.kept, decision, shadow_decision
+
+    def _record_capacity_decision(
+        self,
+        decision: FactEvictionDecision | None,
+        shadow_decision: FactEvictionDecision | None,
+        *,
+        agent_name: str | None,
+        user_id: str | None,
+    ) -> None:
+        """Write best-effort audit only after canonical persistence succeeds."""
+        if decision is None or agent_name is None:
+            return
+        try:
+            self._storage.record_capacity_eviction(
+                decision,
+                max_facts=self._config.max_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+                shadow_decision=shadow_decision,
+            )
+        except Exception:
+            logger.warning("Failed to record capacity-eviction audit", exc_info=True)
+
+    def import_memory_data(
+        self,
+        memory_data: dict[str, Any],
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        replace_shared_summaries: bool = True,
+    ) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
             raise ValueError("memory_data")
-        memory_data = copy.deepcopy(memory_data)
-        empty = create_empty_memory()
-        for section in ("user", "history"):
-            incoming_section = memory_data.get(section, {})
-            if not isinstance(incoming_section, dict):
-                raise ValueError(f"memory_data.{section}")
-            complete_section = copy.deepcopy(empty[section])
-            for key, value in incoming_section.items():
-                if key in complete_section and isinstance(complete_section[key], dict) and isinstance(value, dict):
-                    complete_section[key].update(copy.deepcopy(value))
-                else:
-                    complete_section[key] = copy.deepcopy(value)
-            memory_data[section] = complete_section
+        # Replacement imports must not turn malformed facts into deletions.
+        # Validate before lenient compatibility normalization or any storage read.
+        raw_facts = memory_data.get("facts")
+        if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) or not isinstance(fact.get("content"), str) or not fact["content"].strip() for fact in raw_facts):
+            raise ValueError("memory_data.facts must be a list of facts with non-empty content")
+        memory_data = normalize_memory_data(memory_data)
         if agent_name is not None and getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             current = self.get_memory_data(agent_name, user_id=user_id)
             incoming_facts = copy.deepcopy(memory_data.get("facts", []))
@@ -833,25 +985,64 @@ class MemoryUpdater:
             for fact in incoming_facts:
                 fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
                 fact["confidence"] = _coerce_source_confidence(fact)
+            incoming_facts, capacity_decision, shadow_decision = self._select_for_capacity(
+                incoming_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
             incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
+            change_set = {
+                "upserts": incoming_facts,
+                "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
+                "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
+                "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
+            }
+            if replace_shared_summaries:
+                change_set["summaries"] = {
+                    "user": copy.deepcopy(memory_data.get("user", {})),
+                    "history": copy.deepcopy(memory_data.get("history", {})),
+                }
             self._storage.apply_changes(
-                {
-                    "upserts": incoming_facts,
-                    "upsertRevisions": {str(fact.get("id")): (int(current_by_id[str(fact.get("id"))].get("revision") or 1) if str(fact.get("id")) in current_by_id else None) for fact in incoming_facts},
-                    "deletes": [fact_id for fact_id in current_by_id if fact_id not in incoming_ids],
-                    "deleteRevisions": {fact_id: int(fact.get("revision") or 1) for fact_id, fact in current_by_id.items() if fact_id not in incoming_ids},
-                    "summaries": {"user": copy.deepcopy(memory_data.get("user", {})), "history": copy.deepcopy(memory_data.get("history", {}))},
-                },
+                change_set,
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(current.get("revision") or 0),
             )
+            self._record_capacity_decision(
+                capacity_decision,
+                shadow_decision,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             return self._storage.load(agent_name, user_id=user_id)
         if agent_name is None:
             memory_data["facts"] = []
+            capacity_decision = None
+            shadow_decision = None
+        else:
+            raw_facts = memory_data.get("facts", [])
+            if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) for fact in raw_facts):
+                raise ValueError("memory_data.facts")
+            normalized_facts = []
+            for raw_fact in raw_facts:
+                fact = copy.deepcopy(raw_fact)
+                fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+                fact["confidence"] = _coerce_source_confidence(fact)
+                normalized_facts.append(fact)
+            memory_data["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                normalized_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
         if not self._storage.save(memory_data, agent_name, user_id=user_id):
             raise OSError("Failed to save imported memory data")
+        self._record_capacity_decision(
+            capacity_decision,
+            shadow_decision,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
         return self._storage.load(agent_name, user_id=user_id)
 
     def clear_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -870,6 +1061,10 @@ class MemoryUpdater:
                         user_id=user_id,
                         expected_manifest_revision=int(current.get("revision") or 0),
                     )
+                    self._storage.clear_fact_metadata(
+                        agent_name=agent_name,
+                        user_id=user_id,
+                    )
                     return self.reload_memory_data(agent_name, user_id=user_id)
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
@@ -881,6 +1076,11 @@ class MemoryUpdater:
         cleared_memory["facts"] = []
         if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id, expected_revision=int(current.get("revision") or 0)):
             raise OSError("Failed to save cleared memory data")
+        if agent_name is not None:
+            self._storage.clear_fact_metadata(
+                agent_name=agent_name,
+                user_id=user_id,
+            )
         return cleared_memory
 
     def clear_all_memory_data(self, *, user_id: str | None = None) -> dict[str, Any]:
@@ -905,9 +1105,8 @@ class MemoryUpdater:
         which would couple them to the backend's content normalization and could
         misreport a storage cap on backends that normalize differently.
 
-        The new fact is then trimmed by :func:`_trim_facts_to_max` (highest-
-        confidence wins, confidence coerced). If the cap evicts the just-added
-        (lower-confidence) fact, ``fact_id`` is ``None`` so callers report
+        The new fact is then evaluated by the configured capacity policy. If
+        the cap evicts the just-added fact, ``fact_id`` is ``None`` so callers report
         "not stored - cap reached" instead of a dangling id with a false
         "added" status. This restores both the max_facts cap and the post-trim
         existence check (upstream's ``create_memory_fact_with_created_fact``),
@@ -948,7 +1147,11 @@ class MemoryUpdater:
                 # winner's fact, and is rejected here).
                 _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
-                updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+                updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                    [*memory_data.get("facts", []), copy.deepcopy(candidate)],
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
                 kept_ids = {str(fact.get("id")) for fact in updated_memory["facts"]}
                 deletions = [str(fact.get("id")) for fact in memory_data.get("facts", []) if str(fact.get("id")) not in kept_ids]
                 try:
@@ -962,6 +1165,12 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(memory_data.get("revision") or 0),
+                    )
+                    self._record_capacity_decision(
+                        capacity_decision,
+                        shadow_decision,
+                        agent_name=agent_name,
+                        user_id=user_id,
                     )
                     fresh_memory = self.reload_memory_data(agent_name, user_id=user_id)
                     stored = any(fact.get("id") == fact_id for fact in fresh_memory.get("facts", []))
@@ -980,8 +1189,18 @@ class MemoryUpdater:
             memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
             _raise_if_duplicate_fact_content(memory_data, candidate_key)
             updated_memory = dict(memory_data)
-            updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+            updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                [*memory_data.get("facts", []), copy.deepcopy(candidate)],
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             if self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+                self._record_capacity_decision(
+                    capacity_decision,
+                    shadow_decision,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
                 # If the cap evicted the just-added (lower-confidence) fact,
                 # signal via None so callers don't report a dangling id as
                 # "added".
@@ -1130,14 +1349,21 @@ class MemoryUpdater:
         agent_name: str | None,
         signals: frozenset[str],
         user_id: str | None = None,
+        conversation_text: str | None = None,
     ) -> tuple[dict[str, Any], list[Any]] | None:
-        """Load memory and build the update prompt for a conversation."""
+        """Load memory and build the update prompt for a conversation.
+
+        ``conversation_text`` lets the caller hand over the formatted text it
+        already produced for the memory judge, so the conversation is formatted
+        once per batch instead of twice.
+        """
         config = self._config
         if not messages:
             return None
 
         current_memory = self.get_memory_data(agent_name, user_id=user_id)
-        conversation_text = format_conversation_for_update(messages)
+        if conversation_text is None:
+            conversation_text = format_conversation_for_update(messages)
         if not conversation_text.strip():
             return None
 
@@ -1180,6 +1406,16 @@ class MemoryUpdater:
             "consolidation_section": consolidation_section,
         }
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
+        if config.prompt_prepend or config.prompt_append:
+            # Extend trusted instructions only, after formatting the original
+            # template. Conversation/memory data stays in its human message.
+            for index, message in enumerate(prompt):
+                if message.type == "system":
+                    content = "\n\n".join(part for part in (config.prompt_prepend, message.content, config.prompt_append) if part)
+                    prompt[index] = message.model_copy(update={"content": content})
+                    break
+            else:
+                raise ValueError("Memory prompt overlays require a system message in the configured chat template")
         return current_memory, prompt
 
     def _has_manual_facts(self, memory: dict[str, Any]) -> bool:
@@ -1221,6 +1457,50 @@ class MemoryUpdater:
         except Exception:
             logger.warning("extraction_callback raised; ignoring", exc_info=True)
 
+    def _judge_batch(
+        self,
+        hook: Any,
+        *,
+        batch_text: str,
+        signals: frozenset[str],
+        thread_id: str | None,
+        agent_name: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        bypass_watermark: bool,
+        message_count: int,
+    ) -> Any:
+        """Ask an injected memory judge about this batch; ``None`` when unjudged.
+
+        The hook is a plain callable over a mapping -- the same convention as
+        ``extraction_callback``'s payload -- so DeerMem stays host-agnostic (it
+        imports no host judging types) while the host owns what a verdict means.
+
+        A judge failure is logged and treated as "no opinion": pre-screening must
+        never lose a memory and signal classification must never block one, so
+        this path can only ever fall back to today's behaviour (design L2 / S2).
+        """
+        if hook is None:
+            return None
+        try:
+            return hook(
+                {
+                    "batch_text": batch_text,
+                    "signals": signals,
+                    "staleness_review_enabled": bool(self._config.staleness_review_enabled),
+                    "consolidation_enabled": bool(self._config.consolidation_enabled),
+                    "bypass_watermark": bypass_watermark,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "agent_name": agent_name,
+                    "trace_id": trace_id,
+                    "message_count": message_count,
+                }
+            )
+        except Exception:
+            logger.warning("Memory judge failed; extracting as usual", exc_info=True)
+            return None
+
     def _finalize_update(
         self,
         current_memory: dict[str, Any],
@@ -1230,6 +1510,7 @@ class MemoryUpdater:
         user_id: str | None = None,
         *,
         metrics: dict[str, Any] | None = None,
+        signals: frozenset[str] = frozenset(),
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
@@ -1242,13 +1523,22 @@ class MemoryUpdater:
             # metric tracks the actual filter rather than a re-derived copy here.
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
+                capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] = []
                 # Deep-copy before in-place mutation so a failed commit cannot
                 # corrupt the cached snapshot. On a manifest conflict the
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
                 # must never be replayed as disjoint point writes.
-                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
-                updated_memory = _strip_upload_mentions_from_memory(updated_memory)
+                updated_memory = self._apply_updates(
+                    copy.deepcopy(current_memory),
+                    update_data,
+                    thread_id,
+                    metrics=metrics,
+                    signals=signals,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    capacity_decisions=capacity_decisions,
+                )
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
                 change_set = {
@@ -1270,6 +1560,13 @@ class MemoryUpdater:
                         user_id=user_id,
                         expected_manifest_revision=int(current_memory.get("revision") or 0),
                     )
+                    for decision, shadow_decision in capacity_decisions:
+                        self._record_capacity_decision(
+                            decision,
+                            shadow_decision,
+                            agent_name=agent_name,
+                            user_id=user_id,
+                        )
                     return True
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
@@ -1279,14 +1576,32 @@ class MemoryUpdater:
             raise AssertionError("bounded extracted-update retry did not return or raise")
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
-        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
-        updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return self._storage.save(
+        capacity_decisions = []
+        updated_memory = self._apply_updates(
+            copy.deepcopy(current_memory),
+            update_data,
+            thread_id,
+            metrics=metrics,
+            signals=signals,
+            agent_name=agent_name,
+            user_id=user_id,
+            capacity_decisions=capacity_decisions,
+        )
+        saved = self._storage.save(
             updated_memory,
             agent_name,
             user_id=user_id,
             expected_revision=int(current_memory.get("revision") or 0),
         )
+        if saved:
+            for decision, shadow_decision in capacity_decisions:
+                self._record_capacity_decision(
+                    decision,
+                    shadow_decision,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
+        return saved
 
     async def aupdate_memory(
         self,
@@ -1298,6 +1613,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1316,6 +1632,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _do_update_memory_sync(
@@ -1328,6 +1645,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1351,6 +1669,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    judge=judge,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1360,6 +1679,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
@@ -1423,6 +1743,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -1465,11 +1786,55 @@ class MemoryUpdater:
             # served their purpose (backpressure admission at enqueue); the hint
             # is a soft nudge and must not point at turns the watermark excluded.
             feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
+            # The judge's L3 veto reads the whole batch, not the hint window: a skip
+            # consumes every turn fed here (it advances the watermark), so an explicit
+            # signal anywhere in the batch has to keep that batch out of judging. The
+            # extraction hint above keeps the default 6-message window -- a hint points
+            # at recent turns, a veto answers for the batch.
+            batch_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir, window=None)
+            batch_text = format_conversation_for_update(feed_messages)
+            # The memory judge (when the host injected one) runs here: still off the
+            # turn path, before any LLM call, on exactly the text the extractor would
+            # see -- no second truncation. ``judge=False`` (the shutdown drain) and a
+            # ``None`` hook both leave the batch unjudged.
+            verdict = self._judge_batch(
+                self._config.judge if judge else None,
+                batch_text=batch_text,
+                signals=frozenset(batch_signals),
+                thread_id=thread_id,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                bypass_watermark=bypass_watermark,
+                message_count=len(feed_messages),
+            )
+            verdict_payload = getattr(verdict, "payload", None)
+            if isinstance(verdict_payload, dict):
+                metrics.update({key: value for key, value in verdict_payload.items() if value is not None})
+            if getattr(verdict, "skip", False):
+                # The pre-screen decided this batch is not worth a call: consume it
+                # and advance the watermark (nothing else runs -- no prompt, no
+                # invoke, no apply). Advancing is what makes the saving real; leaving
+                # the watermark put would re-judge a longer batch every turn and the
+                # digest-keyed cache could never hit.
+                if not bypass_watermark:
+                    self._watermark_set(watermark_key, _message_identity(messages[-1]))
+                success = True
+                # The judge record is this batch's only trace, so emit it even though
+                # no LLM call happened (the finally-block gate reads this flag).
+                attempted = True
+                logger.info("Memory extraction skipped by the pre-screen (thread=%s)", thread_id)
+                return True
+            model_hints = getattr(verdict, "hints", None)
             prepared = self._prepare_update_prompt(
                 messages=feed_messages,
                 agent_name=agent_name,
-                signals=feed_signals,
+                # Hint text takes the union (deterministic + model hints); the
+                # reinforcement evidence gate below still reads the deterministic
+                # set only, so a model verdict can never confirm a fact (S4).
+                signals=frozenset(feed_signals) | (model_hints if isinstance(model_hints, frozenset) else frozenset()),
                 user_id=user_id,
+                conversation_text=batch_text,
             )
             if prepared is None:
                 return False
@@ -1494,7 +1859,34 @@ class MemoryUpdater:
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
             attempted = True
-            response = model.invoke(prompt, config=invoke_config)
+            started = time.monotonic()
+            try:
+                response = model.invoke(prompt, config=invoke_config)
+            # Deliberately broader than `Exception` so no terminal path of the
+            # provider call goes unobserved. This is NOT about asyncio
+            # cancellation: this whole method runs on a worker thread (the
+            # debounce timer, or the executor `update_memory` offloads to), and
+            # cancelling the awaiting side never interrupts a running thread, so
+            # `CancelledError` cannot arrive here. Reporting costs nothing on
+            # this path either way — the hook below is a non-blocking submit.
+            except BaseException as exc:
+                self._notify_llm_result(
+                    invoke_config,
+                    prompt=prompt,
+                    response=None,
+                    error=exc,
+                    started=started,
+                    model_name=model_name,
+                )
+                raise
+            self._notify_llm_result(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=None,
+                started=started,
+                model_name=model_name,
+            )
             success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
@@ -1502,6 +1894,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 metrics=metrics,
+                signals=frozenset(feed_signals),
             )
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
@@ -1523,6 +1916,14 @@ class MemoryUpdater:
             # pre-attempt early returns (no new messages, empty conversation, no
             # model) do not emit, matching the prior behavior.
             if attempted:
+                if not success:
+                    # A failed extraction persisted nothing, so the apply-site
+                    # counter must not be published. The evaluation script scores a
+                    # present counter even on ``success=False`` (it is treated as an
+                    # outcome, not a censored failure), which would register a
+                    # rejected commit as a missed memory. Absent + failed is censored
+                    # -- the honest reading (persistent-mutation contract).
+                    metrics.pop("mutations_accepted", None)
                 self._emit_extraction_metrics(
                     metrics,
                     thread_id=thread_id,
@@ -1532,6 +1933,37 @@ class MemoryUpdater:
                     response=response,
                     success=success,
                 )
+
+    def _notify_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        started: float,
+        model_name: str | None,
+    ) -> None:
+        """Fire the optional host result hook without affecting the update."""
+        if self._callbacks is None:
+            return
+        hook = getattr(self._callbacks, "on_memory_llm_result", None)
+        if hook is None:
+            return
+        try:
+            hook(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                model_name=model_name,
+            )
+        except Exception:
+            # Only the hook's own failures are non-fatal. `SystemExit` /
+            # `KeyboardInterrupt` mean the process is going down and must not be
+            # swallowed by an observability path.
+            logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(
         self,
@@ -1543,6 +1975,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        judge: bool = True,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1550,6 +1983,10 @@ class MemoryUpdater:
         separate connection pool from the async ``AsyncClient`` shared by
         the lead agent.  This eliminates the cross-loop connection-reuse
         bug described in issue #2615.
+
+        ``judge=False`` forbids this batch from being judged by the injected
+        memory judge (the shutdown-drain path sets it: the drain budget belongs
+        to persistence, not to a cost optimization).
 
         When called from within a running event loop (e.g. from a LangGraph
         node), the blocking sync call is offloaded to a thread pool so the
@@ -1585,6 +2022,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    judge=judge,
                 )
                 return future.result()
             except Exception:
@@ -1599,6 +2037,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            judge=judge,
         )
 
     def _apply_updates(
@@ -1608,6 +2047,10 @@ class MemoryUpdater:
         thread_id: str | None = None,
         *,
         metrics: dict[str, Any] | None = None,
+        signals: frozenset[str] = frozenset(),
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] | None = None,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -1624,6 +2067,13 @@ class MemoryUpdater:
         """
         config = self._config
         now = utc_now_iso_z()
+        # Mutations that actually landed, counted at their real apply sites. New
+        # facts are counted only after they survive capacity enforcement (and any
+        # consolidation pass), not at the append. This is the pre-screen's "worth
+        # remembering" signal: a batch whose only effect was a summary rewrite
+        # counts zero, so a skip that dropped it is not a missed memory
+        # (pre-screening design §5).
+        mutations_accepted = 0
         scope_gate_rejections: dict[str, dict[str, int]] = {
             "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
             "summaries": {"missing": 0, "scope": 0, "authority": 0},
@@ -1634,9 +2084,39 @@ class MemoryUpdater:
         def reject_by_scope_gate(kind: str, reason: str) -> None:
             scope_gate_rejections[kind][reason] += 1
 
+        # Explicit confirmation is distinct from extraction duplication. The
+        # deterministic gate is batch-level: it proves only that a human
+        # message among the last six filtered messages matched a reinforcement
+        # pattern. The LLM remains responsible for binding that signal to an
+        # existing id, which must be user-scoped and carry a non-empty reason.
+        tracks_hybrid_signals = config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or config.fact_eviction_shadow_enabled
+        if tracks_hybrid_signals and "reinforcement" in signals:
+            reinforced_ids = {
+                entry["id"]
+                for entry in update_data.get("factsToReinforce", [])
+                if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
+            }
+            # Only an id that actually exists can be confirmed. A nonexistent
+            # target changes nothing, so counting it would report an accepted
+            # mutation that never landed (the pre-screen evaluation reads the
+            # counter as "worth remembering").
+            reinforced_ids &= {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            if reinforced_ids:
+                current_memory["facts"] = [
+                    {
+                        **fact,
+                        "lastConfirmedAt": now,
+                        "confirmationCount": _next_confirmation_count(fact),
+                    }
+                    if isinstance(fact, dict) and fact.get("id") in reinforced_ids
+                    else fact
+                    for fact in current_memory.get("facts", [])
+                ]
+                mutations_accepted += len(reinforced_ids)
+
         # Update user sections
         user_updates = update_data.get("user", {})
-        for section in ["workContext", "personalContext", "topOfMind"]:
+        for section in ["workContext", "personalContext", "topOfMind", "cognitiveStyle"]:
             section_data = user_updates.get(section, {})
             if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
                 continue
@@ -1778,6 +2258,25 @@ class MemoryUpdater:
         # persisted-fact count.
         passed_threshold = 0
         replacement_fact_keys: dict[int, str] = {}
+        # Fact IDs appended by this pass. They count as accepted mutations only
+        # if they survive to the final fact set (see the metrics block): capacity
+        # enforcement can evict one immediately, and a later consolidation can
+        # consume one as a source.
+        added_fact_ids: list[str] = []
+        # Existing fact IDs a near-duplicate merge actually changed (confidence
+        # raised). Counted under the same survival rule: a no-op merge (proposed
+        # confidence not higher) changed nothing and must not count.
+        changed_merge_ids: set[str] = set()
+        # Legacy id-less facts cannot be matched by id, so they are tracked by
+        # object identity; the target dicts stay alive in the memory being edited.
+        changed_merge_facts: dict[int, dict[str, Any]] = {}
+        # A correction must keep its proposed content, not inherit an older
+        # paraphrase. Also avoid strengthening any proposed removal target,
+        # including stale targets retained by candidate guards or the cap.
+        # This only excludes dedup matches; removal validation remains below.
+        removal_proposals = [removal for key in ("factsToRemove", "staleFactsToRemove") for removal in (update_data.get(key) if isinstance(update_data.get(key), list) else []) if isinstance(removal, dict)]
+        removal_target_ids = {removal["id"] for removal in removal_proposals if isinstance(removal.get("id"), str)}
+        replacement_indices = {index for removal in removal_proposals if isinstance(index := removal.get("replacementFactIndex"), int) and not isinstance(index, bool) and index >= 0}
         for fact_index, fact in enumerate(new_facts):
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
@@ -1805,6 +2304,49 @@ class MemoryUpdater:
             if fact_key in existing_fact_keys:
                 continue
 
+            # Write-side near-duplicate gate (issue #5252): a proposed new fact
+            # that paraphrases an existing same-category fact merges into it
+            # instead of being appended. The existing id/content/createdAt stay
+            # authoritative; source follows only a confidence increase, never
+            # an unconfirmed lower-confidence restatement.
+            if config.fact_dedup_enabled and fact_index not in replacement_indices:
+                merge_target = _find_dedup_merge_target(
+                    normalized_content,
+                    fact.get("category", "context"),
+                    [candidate for candidate in current_memory.get("facts", []) if candidate.get("id") not in removal_target_ids],
+                    threshold=config.fact_dedup_similarity_threshold,
+                )
+                if merge_target is not None:
+                    try:
+                        existing_confidence = float(merge_target.get("confidence"))
+                        if not math.isfinite(existing_confidence):
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        existing_confidence = 0.0
+                    if confidence > existing_confidence:
+                        merge_target["confidence"] = confidence
+                        merge_target["source"] = thread_id or "unknown"
+                        # This merge persisted a change to an existing fact, so it
+                        # is a mutation outcome too -- but only once we know the
+                        # target survives (the count below checks the final set).
+                        merge_target_id = merge_target.get("id")
+                        if isinstance(merge_target_id, str):
+                            changed_merge_ids.add(merge_target_id)
+                        else:
+                            changed_merge_facts[id(merge_target)] = merge_target
+                    if metrics is not None:
+                        metrics["facts_merged_dedup"] = metrics.get("facts_merged_dedup", 0) + 1
+                    # New proposals have no durable ID yet. Log their batch
+                    # index, not personal fact text; this is a proposed write,
+                    # not a claim that persistence has already succeeded.
+                    logger.info(
+                        "Near-duplicate fact merge proposed: target_id=%s proposal_index=%d confidence_raised=%s",
+                        merge_target.get("id"),
+                        fact_index,
+                        confidence > existing_confidence,
+                    )
+                    continue
+
             fact_entry = {
                 "id": f"fact_{uuid.uuid4().hex[:8]}",
                 "content": normalized_content,
@@ -1828,9 +2370,18 @@ class MemoryUpdater:
                 fact_entry["expected_valid_days"] = min(evd, creation_cap)
             current_memory["facts"].append(fact_entry)
             existing_fact_keys.add(fact_key)
+            added_fact_ids.append(fact_entry["id"])
 
-        # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
-        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)
+        # Enforce one capacity policy across automatic, manual, and import
+        # writes. Usage comes from a separate sidecar, so scoring never rewrites
+        # canonical fact timestamps merely because a query recalled them.
+        current_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+            current_memory["facts"],
+            agent_name=agent_name,
+            user_id=user_id,
+        )
+        if capacity_decision is not None and capacity_decisions is not None:
+            capacity_decisions.append((capacity_decision, shadow_decision))
 
         # Remove contradicted facts only after replacements have passed both
         # gates and survived deduplication/trimming. Task-local contradictions
@@ -1861,7 +2412,14 @@ class MemoryUpdater:
             fact_ids_to_remove.add(fact_id)
 
         if fact_ids_to_remove:
-            current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in fact_ids_to_remove]
+            # Count only targets that actually existed: a scope-valid removal of
+            # a nonexistent id deletes nothing, so counting it would report an
+            # accepted mutation that never landed (the pre-screen evaluation
+            # reads the counter as "worth remembering").
+            landed_removals = fact_ids_to_remove & {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            if landed_removals:
+                current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in landed_removals]
+                mutations_accepted += len(landed_removals)
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
@@ -2036,6 +2594,29 @@ class MemoryUpdater:
                 if ids_consumed:
                     current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
                     current_memory["facts"].extend(new_consolidated)
+                    mutations_accepted += merge_count
+
+        # Finalization scrubs upload-event facts (session-scoped) from the memory it
+        # persists; apply that here, before scoring survival, so a fact accepted by
+        # the apply but dropped by the scrub is not counted as a landed mutation
+        # (the shadow evaluation reads a positive count on a skip as a lost memory).
+        current_memory = _strip_upload_mentions_from_memory(current_memory)
+
+        # Count new facts and changed near-duplicate targets only once they survive
+        # capacity enforcement. A proposed fact can pass the confidence gate and be
+        # appended, then be immediately evicted by _select_for_capacity; a merge
+        # target can be evicted the same way. Counting either would report an
+        # accepted mutation even though the persistent facts are unchanged, and the
+        # pre-screen evaluation reads any positive mutations_accepted on a skip as a
+        # lost memory (memory/AGENTS.md, "worth remembering"). Scoring against the
+        # final fact set also excludes a fact a later consolidation consumed as a
+        # source, whose merge is counted separately.
+        final_fact_ids = {fact.get("id") for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+        mutations_accepted += sum(1 for fact_id in added_fact_ids if fact_id in final_fact_ids)
+        mutations_accepted += sum(1 for fact_id in changed_merge_ids if fact_id in final_fact_ids)
+        if changed_merge_facts:
+            surviving_objects = {id(fact) for fact in current_memory.get("facts", []) if isinstance(fact, dict)}
+            mutations_accepted += sum(1 for object_id in changed_merge_facts if object_id in surviving_objects)
 
         if metrics is not None:
             metrics["facts_passed_confidence"] = passed_threshold
@@ -2043,5 +2624,6 @@ class MemoryUpdater:
             metrics["facts_passed_scope_gate"] = len(new_facts) - sum(scope_gate_rejections["facts"].values())
             metrics["rejected_by_scope_gate"] = sum(count for reasons in scope_gate_rejections.values() for count in reasons.values())
             metrics["scope_gate_rejections"] = scope_gate_rejections
+            metrics["mutations_accepted"] = mutations_accepted
 
         return current_memory

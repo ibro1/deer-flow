@@ -57,7 +57,7 @@ def validate_agent_name(name: str) -> None:
     """Validate that the agent name is safe to use in filesystem paths."""
     if not name:
         raise ValueError("Agent name must be a non-empty string.")
-    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.match(name):
+    if name != DEFAULT_AGENT_BUCKET and not AGENT_NAME_PATTERN.fullmatch(name):
         raise ValueError(f"Invalid agent name {name!r}: names must match {AGENT_NAME_PATTERN.pattern}")
 
 
@@ -106,6 +106,22 @@ def agent_facts_directory(memory_path: Path, agent_name: str) -> Path:
     """Return the fact root for one required agent below a user's memory file."""
     validate_agent_name(agent_name)
     return memory_path.parent / "agents" / agent_name.lower() / "facts"
+
+
+def agent_metadata_directory(memory_path: Path, agent_name: str) -> Path:
+    """Return the non-canonical usage/audit sidecar root for one agent."""
+    validate_agent_name(agent_name)
+    return memory_path.parent / "agents" / agent_name.lower() / ".metadata"
+
+
+def agent_usage_path(memory_path: Path, agent_name: str) -> Path:
+    """Return the lightweight query-access sidecar path for one agent."""
+    return agent_metadata_directory(memory_path, agent_name) / "fact-usage.json"
+
+
+def agent_eviction_audit_path(memory_path: Path, agent_name: str) -> Path:
+    """Return the bounded metadata-only capacity audit path for one agent."""
+    return agent_metadata_directory(memory_path, agent_name) / "eviction-audit.json"
 
 
 def fact_file_path(memory_path: Path, fact_id: str, *, agent_name: str) -> Path:

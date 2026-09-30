@@ -40,6 +40,7 @@ export interface LarkIntegrationStatus {
   cli: LarkCliProbe;
   auth: LarkAuthProbe;
   sandbox_runtime_mode: LarkSandboxRuntimeMode;
+  sandbox_runtime_probed: boolean;
   sandbox_runtime_ready: boolean;
   sandbox_runtime_detail: string | null;
 }
@@ -55,11 +56,13 @@ export interface LarkAuthStartRequest {
   recommend?: boolean;
   domains?: string[];
   scope?: string | null;
+  generation?: string;
 }
 
 export interface LarkAuthStartResponse {
   verification_url: string;
   device_code: string;
+  generation: string;
   expires_in: number | null;
   user_code: string | null;
   hint: string | null;
@@ -72,6 +75,7 @@ export interface LarkConfigStartRequest {
 export interface LarkConfigStartResponse {
   verification_url: string;
   device_code: string;
+  generation: string;
   expires_in: number | null;
   interval: number | null;
   user_code: string | null;
@@ -80,19 +84,28 @@ export interface LarkConfigStartResponse {
 
 export interface LarkConfigCompleteRequest {
   device_code: string;
+  generation: string;
   brand: "feishu" | "lark";
   interval: number | null;
   expires_in: number | null;
 }
 
+export interface LarkConfigCredentialsRequest {
+  app_id: string;
+  app_secret: string;
+  brand: "feishu" | "lark";
+}
+
 export interface LarkConfigCompleteResponse {
   success: boolean;
   message: string;
+  generation: string;
   status: LarkIntegrationStatus;
 }
 
 export interface LarkAuthCompleteRequest {
   device_code: string;
+  generation: string;
   wait_timeout_seconds?: number;
 }
 

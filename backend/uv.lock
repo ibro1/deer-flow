@@ -228,15 +228,15 @@ wheels = [
 
 [[package]]
 name = "anyio"
-version = "4.13.0"
+version = "4.14.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "idna" },
     { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/19/14/2c5dd9f512b66549ae92767a9c7b330ae88e1932ca57876909410251fe13/anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc", size = 231622, upload-time = "2026-03-24T12:59:09.671Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/da/42/e921fccf5015463e32a3cf6ee7f980a6ed0f395ceeaa45060b61d86486c2/anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708", size = 114353, upload-time = "2026-03-24T12:59:08.246Z" },
+    { url = "https://files.pythonhosted.org/packages/da/35/f2287558c17e29fafc8ef3daf819bb9834061cfa43bff8014f7df7f63bdc/anyio-4.14.2-py3-none-any.whl", hash = "sha256:9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494", size = 125813, upload-time = "2026-07-12T20:29:05.763Z" },
 ]
 
 [[package]]
@@ -803,10 +803,11 @@ wheels = [
 
 [[package]]
 name = "deer-flow"
-version = "2.1.0"
+version = "2.2.0dev"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
+    { name = "deerflow-extension-api" },
     { name = "deerflow-harness" },
     { name = "dingtalk-stream" },
     { name = "e2b-code-interpreter" },
@@ -821,6 +822,7 @@ dependencies = [
     { name = "python-telegram-bot" },
     { name = "slack-sdk" },
     { name = "sse-starlette" },
+    { name = "starlette" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "wecom-aibot-python-sdk" },
 ]
@@ -841,6 +843,9 @@ memory-zh = [
 monocle = [
     { name = "deerflow-harness", extra = ["monocle"] },
 ]
+ollama = [
+    { name = "deerflow-harness", extra = ["ollama"] },
+]
 postgres = [
     { name = "deerflow-harness", extra = ["postgres"] },
 ]
@@ -857,6 +862,7 @@ dev = [
     { name = "prompt-toolkit" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-split" },
     { name = "redis" },
     { name = "ruff" },
     { name = "textual" },
@@ -866,10 +872,12 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "coincurve", marker = "extra == 'buzz'", specifier = ">=20.0.0" },
+    { name = "deerflow-extension-api", editable = "packages/extension-api" },
     { name = "deerflow-harness", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["browser"], marker = "extra == 'browser'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["memory-zh"], marker = "extra == 'memory-zh'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["monocle"], marker = "extra == 'monocle'", editable = "packages/harness" },
+    { name = "deerflow-harness", extras = ["ollama"], marker = "extra == 'ollama'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["postgres"], marker = "extra == 'postgres'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["redis"], marker = "extra == 'redis'", editable = "packages/harness" },
     { name = "dingtalk-stream", specifier = ">=0.24.3" },
@@ -886,10 +894,11 @@ requires-dist = [
     { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "slack-sdk", specifier = ">=3.33.0" },
     { name = "sse-starlette", specifier = ">=2.1.0" },
+    { name = "starlette", specifier = ">=1.3.1,<2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34.0" },
     { name = "wecom-aibot-python-sdk", specifier = ">=0.1.6" },
 ]
-provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "browser", "memory-zh"]
+provides-extras = ["postgres", "redis", "discord", "buzz", "monocle", "ollama", "browser", "memory-zh"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -900,14 +909,16 @@ dev = [
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-split", specifier = ">=0.11.0" },
     { name = "redis", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
 ]
+extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.1.0"
+version = "0.2.4"
 source = { editable = "packages/extension-api" }
 
 [[package]]
@@ -919,6 +930,7 @@ dependencies = [
     { name = "agent-sandbox" },
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "beautifulsoup4" },
     { name = "croniter" },
     { name = "cryptography" },
     { name = "ddgs" },
@@ -928,7 +940,9 @@ dependencies = [
     { name = "e2b-code-interpreter" },
     { name = "exa-py" },
     { name = "firecrawl-py" },
+    { name = "html5lib" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "kubernetes" },
     { name = "langchain" },
     { name = "langchain-anthropic" },
@@ -936,21 +950,25 @@ dependencies = [
     { name = "langchain-google-genai" },
     { name = "langchain-mcp-adapters" },
     { name = "langchain-openai" },
+    { name = "langchain-openviking" },
     { name = "langfuse" },
     { name = "langgraph" },
     { name = "langgraph-api" },
+    { name = "langgraph-checkpoint" },
     { name = "langgraph-checkpoint-sqlite" },
     { name = "langgraph-cli" },
     { name = "langgraph-runtime-inmem" },
     { name = "langgraph-sdk" },
     { name = "markdownify" },
     { name = "markitdown", extra = ["all", "xlsx"] },
+    { name = "packaging" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "readabilipy" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tavily-python" },
     { name = "tiktoken" },
+    { name = "tzdata" },
 ]
 
 [package.optional-dependencies]
@@ -969,6 +987,9 @@ monocle = [
 ollama = [
     { name = "langchain-ollama" },
 ]
+opensandbox = [
+    { name = "opensandbox" },
+]
 postgres = [
     { name = "asyncpg" },
     { name = "langgraph-checkpoint-postgres" },
@@ -982,7 +1003,7 @@ redis = [
     { name = "redis" },
 ]
 tenki = [
-    { name = "tenki-sandbox" },
+    { name = "tenki" },
 ]
 tui = [
     { name = "textual" },
@@ -995,6 +1016,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19" },
     { name = "alembic", specifier = ">=1.13" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "boxlite", marker = "extra == 'boxlite'", specifier = ">=0.9.7" },
     { name = "croniter", specifier = ">=6.0.0" },
     { name = "cryptography", specifier = ">=50.0.0" },
@@ -1005,8 +1027,10 @@ requires-dist = [
     { name = "e2b-code-interpreter", specifier = ">=2.8.0" },
     { name = "exa-py", specifier = ">=1.0.0" },
     { name = "firecrawl-py", specifier = ">=1.15.0" },
+    { name = "html5lib", specifier = ">=1.1" },
     { name = "httpx", specifier = ">=0.28.0" },
     { name = "jieba", marker = "extra == 'memory-zh'", specifier = ">=0.42.1" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "kubernetes", specifier = ">=30.0.0" },
     { name = "langchain", specifier = ">=1.3" },
     { name = "langchain-anthropic", specifier = ">=1.4.1" },
@@ -1015,17 +1039,21 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.2.2" },
     { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = ">=0.3.0" },
     { name = "langchain-openai", specifier = ">=1.2.1" },
+    { name = "langchain-openviking", specifier = "==0.1.0" },
     { name = "langfuse", specifier = ">=3.4.1" },
     { name = "langgraph", specifier = ">=1.2.9,<1.3" },
     { name = "langgraph-api", specifier = ">=0.8.1" },
-    { name = "langgraph-checkpoint-postgres", marker = "extra == 'postgres'", specifier = ">=3.1.0,<3.2" },
-    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.0,<3.2" },
+    { name = "langgraph-checkpoint", specifier = ">=4.2.0,<5.0" },
+    { name = "langgraph-checkpoint-postgres", marker = "extra == 'postgres'", specifier = ">=3.1.2,<3.2" },
+    { name = "langgraph-checkpoint-sqlite", specifier = ">=3.1.1,<3.2" },
     { name = "langgraph-cli", specifier = ">=0.4.24" },
-    { name = "langgraph-runtime-inmem", specifier = ">=0.28.0" },
+    { name = "langgraph-runtime-inmem", specifier = ">=0.30.0" },
     { name = "langgraph-sdk", specifier = ">=0.1.51" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
     { name = "monocle-apptrace", marker = "extra == 'monocle'", specifier = ">=0.8.8" },
+    { name = "opensandbox", marker = "extra == 'opensandbox'", specifier = ">=0.1.15,<0.2.0" },
+    { name = "packaging", specifier = ">=24.2" },
     { name = "playwright", marker = "extra == 'browser'", specifier = ">=1.40" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.3.3" },
     { name = "psycopg-pool", marker = "extra == 'postgres'", specifier = ">=3.3.0" },
@@ -1036,11 +1064,12 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
-    { name = "tenki-sandbox", marker = "extra == 'tenki'", specifier = ">=0.4.0" },
+    { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
+    { name = "tzdata", specifier = ">=2025.1" },
 ]
-provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "monocle", "browser", "memory-zh"]
+provides-extras = ["tui", "groundroute", "ollama", "postgres", "redis", "pymupdf", "boxlite", "tenki", "opensandbox", "monocle", "browser", "memory-zh"]
 
 [[package]]
 name = "defusedxml"
@@ -1590,15 +1619,15 @@ wheels = [
 
 [[package]]
 name = "h2"
-version = "4.3.0"
+version = "4.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "hpack" },
     { name = "hyperframe" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1d/17/afa56379f94ad0fe8defd37d6eb3f89a25404ffc71d4d848893d270325fc/h2-4.3.0.tar.gz", hash = "sha256:6c59efe4323fa18b47a632221a1888bd7fde6249819beda254aeca909f221bf1", size = 2152026, upload-time = "2025-08-23T18:12:19.778Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/85/7c366e69d84c17bb778fe41419e1fbcce3033d5b7ce29bbffff0a98b859f/h2-4.4.1.tar.gz", hash = "sha256:4e866ffb1a869ae14dd9b5e6beb5c24a13da0495ad72b65925ded182521c1516", size = 2157281, upload-time = "2026-08-03T11:45:09.509Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/69/b2/119f6e6dcbd96f9069ce9a2665e0146588dc9f88f29549711853645e736a/h2-4.3.0-py3-none-any.whl", hash = "sha256:c438f029a25f7945c69e0ccf0fb951dc3f73a5f6412981daee861431b70e2bdd", size = 61779, upload-time = "2025-08-23T18:12:17.779Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/22/e85faf23bd72a92d1921e37d674ca56eb298a3c8be31fdecef0ff2b3aaac/h2-4.4.1-py3-none-any.whl", hash = "sha256:0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6", size = 62636, upload-time = "2026-08-03T11:44:59.164Z" },
 ]
 
 [[package]]
@@ -2098,6 +2127,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-openviking"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "openviking-sdk" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7f/c0/418dba42bddb5093d20d5e36c3e8d9ceff0b27ce92a6bc2f16fb33535fac/langchain_openviking-0.1.0.tar.gz", hash = "sha256:dc4ee47a122527881eae1fbbe6f9ca857cc0269cd60f08c8d3fd3fff94996e9e", size = 48694, upload-time = "2026-08-03T10:45:28.614Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/22/87f547ab4a84fa4094462e1e1cfdbadf28a539b5cd0efdb147b754d3b88a/langchain_openviking-0.1.0-py3-none-any.whl", hash = "sha256:ea32f08fa4bed81743e0d11e5f2f52e940c1464de74408d45bd574c081a4dffb", size = 55506, upload-time = "2026-08-03T10:45:27.421Z" },
+]
+
+[[package]]
 name = "langchain-protocol"
 version = "0.0.18"
 source = { registry = "https://pypi.org/simple" }
@@ -2190,20 +2233,20 @@ wheels = [
 
 [[package]]
 name = "langgraph-checkpoint"
-version = "4.1.1"
+version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langchain-core" },
     { name = "ormsgpack" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/83/47/886af6f886f0bff2273164a45f008694e48a96ff3cd25ff0228f2aa9480e/langgraph_checkpoint-4.1.1.tar.gz", hash = "sha256:6c2bdb530c91f91d7d9c1bd100925d0fc4f498d418c17f3587d1526279482a25", size = 184020, upload-time = "2026-05-22T16:57:38.503Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dc/e1/089c4c9e0a2fec7f883f82ae8e6a727138d50074cfeb6644bc2d13b1019b/langgraph_checkpoint-4.2.0.tar.gz", hash = "sha256:51a593b6bee684b0818e5d6e58e28ab340c6db7794575056ce7bd1b746a84ed7", size = 180239, upload-time = "2026-08-07T20:05:03.756Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bd/b4/71425e3e38be92611300b9cc5e46a5bf98ab23f5ea8a75b73d02a2f1413c/langgraph_checkpoint-4.1.1-py3-none-any.whl", hash = "sha256:25d29144b082827218e7bc3f1e9b0566a4bb007895cd6cc26f66a8428739f56e", size = 56212, upload-time = "2026-05-22T16:57:37.203Z" },
+    { url = "https://files.pythonhosted.org/packages/05/71/3b475f09bd57d3a5649792c66353312b4432afd843f301739dfcebd157f0/langgraph_checkpoint-4.2.0-py3-none-any.whl", hash = "sha256:0547fd228935a0b758865de3a3d6d7a2537c308895d0f9ab092ce9151b5da942", size = 56833, upload-time = "2026-08-07T20:05:02.655Z" },
 ]
 
 [[package]]
 name = "langgraph-checkpoint-postgres"
-version = "3.1.0"
+version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "langgraph-checkpoint" },
@@ -2211,23 +2254,23 @@ dependencies = [
     { name = "psycopg" },
     { name = "psycopg-pool" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6d/51/5a2dc42e8b5d5942b933b5b7237eae5a4dbc92508a04727c263dd383ad8a/langgraph_checkpoint_postgres-3.1.0.tar.gz", hash = "sha256:02bff4ab63d9dae8eab3a9640fce1d479da8965c9fba7b0dc04cb1f7c56f0a55", size = 148473, upload-time = "2026-05-12T03:40:10.599Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/9d/52/6e732f7bf702ef4918b64ea4107e7da21d4276b808f9a651fe34be9b0abe/langgraph_checkpoint_postgres-3.1.2.tar.gz", hash = "sha256:1cd404803ff895a2b79f3ac04ce92b775e6b999715f8333fce674c6d927bba95", size = 155091, upload-time = "2026-08-07T20:40:00.049Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/cd/eff9b82bc3b5f62d481b437099f44f3ef7b1d907f166fb4ee25e8f84a1e7/langgraph_checkpoint_postgres-3.1.0-py3-none-any.whl", hash = "sha256:814cce2ef35d792bf07b090a95eed004f1acac0724fe6605536b13f6d1e7032c", size = 48988, upload-time = "2026-05-12T03:40:08.925Z" },
+    { url = "https://files.pythonhosted.org/packages/0f/62/8899c9f4d9b97d5b3eb0c07c13cdf5f63342f15f5ef93eaf3477958df602/langgraph_checkpoint_postgres-3.1.2-py3-none-any.whl", hash = "sha256:6a7e38ef16985b54e356cba7bdaf447943aae33d5aaf290026c593bb6b4a6264", size = 52084, upload-time = "2026-08-07T20:39:58.994Z" },
 ]
 
 [[package]]
 name = "langgraph-checkpoint-sqlite"
-version = "3.1.0"
+version = "3.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "langgraph-checkpoint" },
     { name = "sqlite-vec" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e3/ea/83917c2369acf8a10a894d4247655fd063c07924ba5bc4e83c85d2eaeded/langgraph_checkpoint_sqlite-3.1.0.tar.gz", hash = "sha256:f926916ebc1b985d802cc9c820026036e84db9d910d62c97b57e4ba64f67d5ae", size = 147902, upload-time = "2026-05-12T03:34:52.503Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/b1/26fef7572c4fce0322740ef3fcee471510028355d4d4c1d800f0fd432d73/langgraph_checkpoint_sqlite-3.1.1.tar.gz", hash = "sha256:6fcb20db4c37ef7aad52f29b539eb98c38e2dad6fab7c2446a2a9db24f37a70e", size = 146805, upload-time = "2026-07-30T19:19:37.516Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/07/b342811a16327900af2747c752ea19676172fcddf9b592cc384031076623/langgraph_checkpoint_sqlite-3.1.0-py3-none-any.whl", hash = "sha256:cc9b40df0076feae8a9ad42ae713621b148b00ac23adc09dc1dc66090a46e5ad", size = 38587, upload-time = "2026-05-12T03:34:51.231Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/b9/e458601a1718337839bcfeec9d1b27b8b16ce135be2bd50ed0395d33a878/langgraph_checkpoint_sqlite-3.1.1-py3-none-any.whl", hash = "sha256:8505c54c94a658080525d7e6780fdd4e0c078ff2566b30d399c02cc9f9af1c63", size = 40785, upload-time = "2026-07-30T19:19:36.424Z" },
 ]
 
 [[package]]
@@ -2978,6 +3021,21 @@ wheels = [
 ]
 
 [[package]]
+name = "opensandbox"
+version = "0.1.15"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "python-dateutil" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/21/654a3d69815b09690e926d553f3f4a178640d1206000a1b49f5e22c8eb68/opensandbox-0.1.15.tar.gz", hash = "sha256:017abc9b399b88da51bf077d6fb94ee89b1783e601495e85ba85fed478fed1b0", size = 228729, upload-time = "2026-07-24T09:36:29.988Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d5/5c/ab87ea696531210790feb8f575471036fccba29dedaff201736f15bbb3a7/opensandbox-0.1.15-py3-none-any.whl", hash = "sha256:992b01490551f4d8e3f99caa25e34cb9d1690f0c5027eeebab912738291957d1", size = 538522, upload-time = "2026-07-24T09:36:28.277Z" },
+]
+
+[[package]]
 name = "opentelemetry-api"
 version = "1.41.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3072,6 +3130,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9e/de/911ac9e309052aca1b20b2d5549d3db45d1011e1a610e552c6ccdd1b64f8/opentelemetry_semantic_conventions-0.62b1.tar.gz", hash = "sha256:c5cc6e04a7f8c7cdd30be2ed81499fa4e75bfbd52c9cb70d40af1f9cd3619802", size = 145750, upload-time = "2026-04-24T13:15:52.236Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/eb/a6/83dc2ab6fa397ee66fba04fe2e74bdf7be3b3870005359ceb7689103c058/opentelemetry_semantic_conventions-0.62b1-py3-none-any.whl", hash = "sha256:cf506938103d331fbb78eded0d9788095f7fd59016f2bda813c3324e5a74a93c", size = 231620, upload-time = "2026-04-24T13:15:35.454Z" },
+]
+
+[[package]]
+name = "openviking-sdk"
+version = "0.1.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/65/021ba0a777750d536b70e7ca5c14888d9e906627b80a9332b2c644082480/openviking_sdk-0.1.6.tar.gz", hash = "sha256:7ecfdebdbe3538556584e4348f19f1c990831c739404ee4e06e251f3d8a6641d", size = 40041, upload-time = "2026-08-03T07:15:38.963Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6b/86/e0a9ff16d5b5eb38871450110b0ba64bff7a46020c617c482d4ce0ea3e7a/openviking_sdk-0.1.6-py3-none-any.whl", hash = "sha256:61e55f51f2733b80950488bb57299c5fd1bface388242ebff02c245ab6e04bd5", size = 25058, upload-time = "2026-08-03T07:15:37.776Z" },
 ]
 
 [[package]]
@@ -3915,6 +3985,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-split"
+version = "0.11.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2f/16/8af4c5f2ceb3640bb1f78dfdf5c184556b10dfe9369feaaad7ff1c13f329/pytest_split-0.11.0.tar.gz", hash = "sha256:8ebdb29cc72cc962e8eb1ec07db1eeb98ab25e215ed8e3216f6b9fc7ce0ec2b5", size = 13421, upload-time = "2026-02-03T09:14:31.469Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/a1/d4423657caaa8be9b31e491592b49cebdcfd434d3e74512ce71f6ec39905/pytest_split-0.11.0-py3-none-any.whl", hash = "sha256:899d7c0f5730da91e2daf283860eb73b503259cb416851a65599368849c7f382", size = 11911, upload-time = "2026-02-03T09:14:33.708Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -4570,17 +4652,17 @@ wheels = [
 ]
 
 [[package]]
-name = "tenki-sandbox"
-version = "0.4.0"
+name = "tenki"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/58/f6527c63b2e4c94fd00a48ba4bd93ef52de22dbc72e247110949a17511f6/tenki_sandbox-0.4.0.tar.gz", hash = "sha256:2836e6e7100dfc81715b4d93ecfe80e3f055867498cb9f34be921a02969bb15f", size = 179392, upload-time = "2026-07-17T22:18:09.869Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/68/d9/1669b9ffe9b729a854985918ec84f39abf1ba032764a00bd105459e7e97d/tenki-1.0.2.tar.gz", hash = "sha256:131947e54758674f814a66699d3b65518adc9f093a62ea6dddbd4394cbc771c4", size = 240024, upload-time = "2026-08-27T19:40:32.85Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/f7/3c02da98793dc0e56230c520064d7d233c6e0edab13b410c031e1cfe7fd9/tenki_sandbox-0.4.0-py3-none-any.whl", hash = "sha256:76d5ece2e1607b43705587d86277e983ef43601a86993077e379be8033a40b3e", size = 155246, upload-time = "2026-07-17T22:18:08.383Z" },
+    { url = "https://files.pythonhosted.org/packages/98/ef/06486b129744c3f7293f9b1f1ea60055104db4d4ad03483c6857c57c0bbb/tenki-1.0.2-py3-none-any.whl", hash = "sha256:6259651ed243e071e88d789fa86a7c570954ec5f0372a40bcccc2d4b9ae2e342", size = 164788, upload-time = "2026-08-27T19:40:30.915Z" },
 ]
 
 [[package]]

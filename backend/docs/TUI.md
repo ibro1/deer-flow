@@ -26,8 +26,8 @@ Launch modes:
 | `deerflow chat` | Same TUI conversation surface |
 | `deerflow --continue` | Resume the most recent thread |
 | `deerflow --resume THREAD` | Resume a thread by id |
-| `deerflow --print "question"` | Headless one-shot answer to stdout |
-| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s |
+| `deerflow --print "question"` | Headless one-shot answer to stdout; on failure a concise stderr line and exit 1 |
+| `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s; on failure one terminal `{"type": "error"}` record and exit 1 |
 | `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
@@ -70,10 +70,15 @@ for trusted embedded CLI runs.
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
 | `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
+
+Transcript updates follow new output while the view is at the bottom. After you
+scroll upward, streaming refreshes preserve the reading position until you
+return to the bottom with `PageDown`.
 
 ### Slash commands
 

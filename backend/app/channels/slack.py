@@ -13,7 +13,7 @@ from markdown_to_mrkdwn import SlackMarkdownConverter
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,16 @@ def _strip_leading_slack_bot_mention(text: str, bot_user_id: str | None) -> str:
     return text[end + 1 :].lstrip()
 
 
+def _unescape_slack_text(text: str) -> str:
+    """Decode the three entities Slack escapes in message text.
+
+    Slack sends a user-typed ``&``, ``<`` and ``>`` as ``&amp;``, ``&lt;`` and
+    ``&gt;`` so that raw ``<...>`` always marks a control sequence (mention,
+    link). ``&amp;`` is decoded last so an escaped entity is decoded only once.
+    """
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
 class SlackChannel(Channel):
     """Slack IM channel using Socket Mode (WebSocket, no public IP).
 
@@ -137,16 +147,35 @@ class SlackChannel(Channel):
 
         self._socket_client.socket_mode_request_listeners.append(self._on_socket_event)
 
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
-        # Start socket mode in background thread
-        asyncio.get_event_loop().run_in_executor(None, self._socket_client.connect)
+        # Start socket mode in background thread. Go through
+        # ``_connect_socket_mode`` so a connect failure gets logged: nothing
+        # awaits the future ``run_in_executor`` returns, so an exception stored
+        # on it would never surface.
+        socket_client = self._socket_client
+        asyncio.get_event_loop().run_in_executor(None, self._connect_socket_mode, socket_client)
         logger.info("Slack channel started")
+
+    def _connect_socket_mode(self, socket_client: Any) -> None:
+        """Connect one start attempt's Socket Mode client if it is still current.
+
+        Mirrors the Telegram and Discord channels, whose background threads log
+        their errors instead of letting them vanish with the thread.
+        """
+        if socket_client is not self._socket_client:
+            return
+        try:
+            socket_client.connect()
+        except Exception:
+            logger.exception("[Slack] Socket Mode connection failed; the channel will not receive events")
 
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
         if self._socket_client:
             self._socket_client.close()
             self._socket_client = None
@@ -290,6 +319,8 @@ class SlackChannel(Channel):
 
     def _on_socket_event(self, client, req) -> None:
         """Called by slack-sdk for each Socket Mode event."""
+        if not self._running:
+            return
         try:
             # Acknowledge the event
             response = self._SocketModeResponse(envelope_id=req.envelope_id)
@@ -328,20 +359,27 @@ class SlackChannel(Channel):
         text = event.get("text", "").strip()
         if event.get("type") == "app_mention":
             text = _strip_leading_slack_bot_mention(text, self._bot_user_id)
+        # Decode after mention stripping: a real mention is a raw <@...>, while
+        # a user-typed "<@...>" arrives as &lt;@...&gt; and must stay text.
+        text = _unescape_slack_text(text)
         if not text:
             return
 
         connect_code = self._pending_connect_code(text)
         if connect_code:
             if self._loop and self._loop.is_running():
-                asyncio.run_coroutine_threadsafe(
+                scheduled = self._submit_threadsafe_coroutine(
                     self._bind_connection_from_connect_code(
                         event=event,
                         team_id=str(team_id or ""),
                         code=connect_code,
                     ),
                     self._loop,
+                    name="bind_connection",
+                    msg_id=event.get("ts"),
                 )
+                if not scheduled:
+                    logger.info("[Slack] main loop stopped before channel connection bind could be scheduled")
             return
 
         # Check allowed users after connect-code handling so browser-initiated
@@ -377,18 +415,44 @@ class SlackChannel(Channel):
         inbound.topic_id = thread_ts
 
         if self._loop and self._loop.is_running():
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
             # Acknowledge with an eyes reaction
             self._add_reaction(channel_id, event.get("ts", thread_ts), "eyes")
             # Send "running" reply first (fire-and-forget from SDK thread)
             self._send_running_reply(channel_id, thread_ts)
-            if self._connection_repo is None:
-                asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)
-            else:
-                asyncio.run_coroutine_threadsafe(self._publish_inbound_with_connection(inbound, team_id=team_id), self._loop)
+            try:
+                if self._connection_repo is None:
+                    # Reservation bounds callbacks scheduled from the SDK
+                    # thread; no coroutine/Future waits for queue capacity.
+                    self._loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
+                else:
+                    scheduled = self._submit_threadsafe_coroutine(
+                        self._publish_inbound_with_connection(inbound, reservation=reservation, team_id=team_id),
+                        self._loop,
+                        name="publish_inbound",
+                        msg_id=event.get("ts", thread_ts),
+                        reservation=reservation,
+                    )
+                    if not scheduled:
+                        logger.info("[Slack] main loop stopped before reserved inbound could be scheduled")
+            except RuntimeError:
+                reservation.release()
+                logger.info("[Slack] main loop stopped before reserved inbound could be scheduled")
 
-    async def _publish_inbound_with_connection(self, inbound, *, team_id: str | None = None) -> None:
-        inbound = await self._attach_connection_identity(inbound, team_id=team_id)
-        await self.bus.publish_inbound(inbound)
+    async def _publish_inbound_with_connection(
+        self,
+        inbound,
+        *,
+        reservation: InboundReservation,
+        team_id: str | None = None,
+    ) -> None:
+        try:
+            inbound = await self._attach_connection_identity(inbound, team_id=team_id)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
 
     async def _attach_connection_identity(self, inbound, *, team_id: str | None = None):
         workspace_id = str(team_id or inbound.metadata.get("team_id") or "")

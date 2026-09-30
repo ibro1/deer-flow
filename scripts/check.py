@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+PNPM_SCRIPT_PATH = Path(__file__).resolve().with_name("pnpm.py")
 FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 COREPACK_NOTICE = "Using pnpm via Corepack."
 
@@ -97,15 +97,18 @@ def main() -> int:
                 print(
                     f"  FAIL Node.js {node_version.lstrip('v')} found, but version 22+ is required"
                 )
-                print("    Install from: https://nodejs.org/")
+                print("    With nvm: nvm install 22 && nvm use 22")
+                print("    Other install methods: https://nodejs.org/en/download")
                 failed = True
         else:
             print("  INFO Unable to determine Node.js version")
-            print("    Install from: https://nodejs.org/")
+            print("    With nvm: nvm install 22 && nvm use 22")
+            print("    Other install methods: https://nodejs.org/en/download")
             failed = True
     else:
         print("  FAIL Node.js not found (version 22+ required)")
-        print("    Install from: https://nodejs.org/")
+        print("    With nvm: nvm install 22 && nvm use 22")
+        print("    Other install methods: https://nodejs.org/en/download")
         failed = True
 
     print()

@@ -13,8 +13,11 @@ import {
 } from "@/components/ui/sidebar";
 
 import { WorkspaceChannelsList } from "./channels/workspace-channels-list";
+import { PluginNavigation } from "./plugin-navigation";
+import { ProjectsSection } from "./projects-section";
 import { RecentChatList } from "./recent-chat-list";
 import { RemoteSessionsList } from "./remote-sessions-list";
+import { ThreadDeleteDialogProvider } from "./thread-delete-dialog";
 import { WorkspaceHeader } from "./workspace-header";
 import { WorkspaceModeTabs } from "./workspace-mode-tabs";
 import { WorkspaceNavChatList } from "./workspace-nav-chat-list";
@@ -27,7 +30,7 @@ export function WorkspaceSidebar({
   const pathname = usePathname();
   const isRemoteMode = pathname.startsWith("/workspace/remote-control");
   return (
-    <>
+    <ThreadDeleteDialogProvider>
       <Sidebar variant="sidebar" collapsible="icon" {...props}>
         <SidebarHeader className="py-0">
           <WorkspaceHeader />
@@ -41,8 +44,14 @@ export function WorkspaceSidebar({
           ) : (
             <>
               <WorkspaceNavChatList />
+              <PluginNavigation />
               <WorkspaceChannelsList />
-              {isSidebarOpen && <RecentChatList />}
+              {isSidebarOpen && (
+                <>
+                  <ProjectsSection />
+                  <RecentChatList />
+                </>
+              )}
             </>
           )}
         </SidebarContent>
@@ -51,6 +60,6 @@ export function WorkspaceSidebar({
         </SidebarFooter>
         <SidebarRail />
       </Sidebar>
-    </>
+    </ThreadDeleteDialogProvider>
   );
 }

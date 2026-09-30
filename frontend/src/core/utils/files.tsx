@@ -12,6 +12,7 @@ const extensionMap: Record<string, string> = {
   // Text
   txt: "text",
   csv: "csv",
+  tsv: "tsv",
   log: "text",
   conf: "text",
   config: "text",
@@ -233,6 +234,8 @@ export function getFileIcon(filepath: string, className?: string) {
     case "jpg":
     case "jpeg":
     case "png":
+    case "apng":
+    case "avif":
     case "gif":
     case "bmp":
     case "tiff":
@@ -253,6 +256,7 @@ export function getFileIcon(filepath: string, className?: string) {
     case "mp4":
     case "mov":
     case "m4v":
+    case "webm":
       return <FilePlayIcon className={className} />;
     default:
       if (isCodeFile) {

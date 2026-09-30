@@ -15,6 +15,7 @@ import {
   installLarkIntegration,
   LarkIntegrationRequestError,
   loadLarkIntegrationStatus,
+  setLarkAppCredentials,
   startLarkAuthorization,
   startLarkConfiguration,
 } from "@/core/integrations/lark/api";
@@ -35,6 +36,7 @@ beforeEach(() => {
 
 describe("lark integration api", () => {
   test("loads status", async () => {
+    const controller = new AbortController();
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {
         installed: false,
@@ -53,19 +55,24 @@ describe("lark integration api", () => {
         cli: { available: false, path: null, version: null, error: "missing" },
         auth: { status: "unavailable", message: "missing", user: null },
         sandbox_runtime_mode: "init-container",
+        sandbox_runtime_probed: true,
         sandbox_runtime_ready: false,
         sandbox_runtime_detail: "init image not configured",
       }),
     );
 
-    await expect(loadLarkIntegrationStatus()).resolves.toMatchObject({
+    await expect(
+      loadLarkIntegrationStatus(controller.signal),
+    ).resolves.toMatchObject({
       installed: false,
       version: "v1.0.65",
       sandbox_runtime_mode: "init-container",
+      sandbox_runtime_probed: true,
       sandbox_runtime_ready: false,
     });
     expect(mockedFetch).toHaveBeenCalledWith(
       "/backend/api/integrations/lark/status",
+      { signal: controller.signal },
     );
   });
 
@@ -134,6 +141,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         verification_url: "https://open.feishu.cn/auth/mock",
         device_code: "device-code",
+        generation: "auth-generation",
         expires_in: 600,
         user_code: null,
         hint: null,
@@ -149,6 +157,7 @@ describe("lark integration api", () => {
     ).resolves.toEqual({
       verification_url: "https://open.feishu.cn/auth/mock",
       device_code: "device-code",
+      generation: "auth-generation",
       expires_in: 600,
       user_code: null,
       hint: null,
@@ -172,6 +181,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         verification_url: "https://open.feishu.cn/page/cli?user_code=config",
         device_code: "config-device-code",
+        generation: "config-generation",
         expires_in: 600,
         interval: 5,
         user_code: "config",
@@ -182,6 +192,7 @@ describe("lark integration api", () => {
     await expect(startLarkConfiguration({ brand: "feishu" })).resolves.toEqual({
       verification_url: "https://open.feishu.cn/page/cli?user_code=config",
       device_code: "config-device-code",
+      generation: "config-generation",
       expires_in: 600,
       interval: 5,
       user_code: "config",
@@ -202,6 +213,7 @@ describe("lark integration api", () => {
       jsonResponse(200, {
         success: true,
         message: "Lark/Feishu connection setup completed.",
+        generation: "config-generation",
         status: {
           installed: true,
           version: "v1.0.65",
@@ -234,6 +246,7 @@ describe("lark integration api", () => {
     await expect(
       completeLarkConfiguration({
         device_code: "config-device-code",
+        generation: "config-generation",
         brand: "feishu",
         interval: 5,
         expires_in: 600,
@@ -249,9 +262,70 @@ describe("lark integration api", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           device_code: "config-device-code",
+          generation: "config-generation",
           brand: "feishu",
           interval: 5,
           expires_in: 600,
+        }),
+      },
+    );
+  });
+
+  test("switches app credentials", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        message:
+          "Lark/Feishu app switched. Reconnect to authorize the new app.",
+        generation: "switch-generation",
+        status: {
+          installed: true,
+          version: "v1.0.65",
+          manifest_version: "v1.0.65",
+          latest_available_version: "v1.0.65",
+          runtime_version_mismatch: false,
+          app_configured: true,
+          app_id: "cli_new",
+          app_brand: "feishu",
+          skills_expected: 27,
+          skills_installed: 1,
+          installed_skills: ["lark-doc"],
+          enabled_skills: ["lark-doc"],
+          install_path: "/tmp/lark-cli",
+          cli: {
+            available: true,
+            path: "/usr/bin/lark-cli",
+            version: "v1.0.65",
+            error: null,
+          },
+          auth: {
+            status: "not_authorized",
+            message: "not authorized",
+            user: null,
+          },
+        },
+      }),
+    );
+
+    await expect(
+      setLarkAppCredentials({
+        app_id: "cli_new",
+        app_secret: "new-secret",
+        brand: "feishu",
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      status: { app_configured: true, app_id: "cli_new" },
+    });
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/backend/api/integrations/lark/config/credentials",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          app_id: "cli_new",
+          app_secret: "new-secret",
+          brand: "feishu",
         }),
       },
     );
@@ -292,7 +366,10 @@ describe("lark integration api", () => {
     );
 
     await expect(
-      completeLarkAuthorization({ device_code: "device-code" }),
+      completeLarkAuthorization({
+        device_code: "device-code",
+        generation: "auth-generation",
+      }),
     ).resolves.toMatchObject({
       success: true,
       status: { auth: { status: "authenticated", user: "Alice" } },
@@ -302,8 +379,36 @@ describe("lark integration api", () => {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ device_code: "device-code" }),
+        body: JSON.stringify({
+          device_code: "device-code",
+          generation: "auth-generation",
+        }),
       },
     );
+  });
+
+  test("status load defaults sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { installed: false, version: "v1.0.65" }),
+    );
+
+    const result = await loadLarkIntegrationStatus();
+
+    expect(result.sandbox_runtime_probed).toBe(false);
+  });
+
+  test("mutation responses default sandbox_runtime_probed to false when the backend omits it", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        installed_skills: ["lark-doc"],
+        message: "Installed 1 Lark/Feishu skills.",
+        status: { installed: true, version: "v1.0.65" },
+      }),
+    );
+
+    const result = await installLarkIntegration();
+
+    expect(result.status.sandbox_runtime_probed).toBe(false);
   });
 });

@@ -120,6 +120,20 @@ def test_bound_build_snapshot_is_used_by_lead_and_subagent_fallbacks():
     assert subagent_capture.ctx is not None
 
 
+def test_lead_system_middlewares_capture_the_explicit_build_snapshot():
+    from deerflow.agents.middlewares.title_middleware import TitleMiddleware
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("observer:install"):
+        registry.system_model_observer(object())
+    extensions = registry.build()
+
+    stack = _lead_stack(extensions)
+    title = next(item for item in stack if isinstance(item, TitleMiddleware))
+
+    assert title._extensions is extensions
+
+
 def test_tool_visible_lands_at_the_outermost_position():
     stack = _lead_stack(_extensions(MiddlewarePlacement(_Probe("visible"), Placement.TOOL_VISIBLE)))
     assert _tags(stack)[0] == "visible"
@@ -408,3 +422,19 @@ def test_lead_build_context_projects_the_effective_delegation_override():
 
     assert capture.ctx is not None
     assert capture.ctx.policy.max_subagents_per_run == 3
+
+
+@pytest.mark.parametrize(("requested", "projected"), [(None, 7), (99, 50)])
+def test_lead_build_context_projects_the_enforced_delegation_cap(requested, projected):
+    capture = _CtxCapture()
+    _lead_stack(
+        extensions=_extensions_with_contributor(capture),
+        app_config=_policy_config(),
+        configurable={
+            "subagent_enabled": True,
+            "max_total_subagents": requested,
+        },
+    )
+
+    assert capture.ctx is not None
+    assert capture.ctx.policy.max_subagents_per_run == projected

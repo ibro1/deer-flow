@@ -14,10 +14,13 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
     SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_id,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
 )
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
     normalize_tool_result,
     stamp_exception_meta,
 )
@@ -98,6 +101,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         if getattr(message, "status", "success") == "error":
             return message
+        tool_meta = message.additional_kwargs.get(TOOL_META_KEY)
+        if isinstance(tool_meta, dict) and tool_meta.get("status") == "error":
+            return message
         content = message.content if isinstance(message.content, str) else None
         if content is None:
             return message
@@ -109,15 +115,47 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        args = request.tool_call.get("args") or {}
+        usage = build_skill_usage(
+            path,
+            content,
+            skills_root=self._skills_root,
+            partial=args.get("start_line") is not None or args.get("end_line") is not None,
+        )
+        if usage is not None:
+            existing[SKILL_USAGE_KEY] = usage
         message.additional_kwargs = existing
         return message
 
     def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
-        if not isinstance(result, ToolMessage):
-            return result
         tool_name = str(request.tool_call.get("name") or "")
-        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
+        tool_call_id = _tool_call_id(request.tool_call)
+
+        def stamp(message: ToolMessage) -> None:
+            # Tool-returned kwargs are untrusted. Only this middleware may add
+            # skill evidence after checking the configured producer and path.
+            existing = dict(message.additional_kwargs or {})
+            existing.pop(SKILL_CONTEXT_ENTRY_KEY, None)
+            existing.pop(SKILL_USAGE_KEY, None)
+            message.additional_kwargs = existing
+            if tool_call_id is None or str(message.tool_call_id) == tool_call_id:
+                self._stamp_skill_read_metadata(message, request, tool_name=tool_name)
+
+        if isinstance(result, ToolMessage):
+            stamp(result)
+            return result
+        update = getattr(result, "update", None)
+        if not isinstance(update, dict):
+            return result
+        messages = update.get("messages")
+        if isinstance(messages, ToolMessage):
+            stamp(messages)
+        elif isinstance(messages, (list, tuple)):
+            for message in messages:
+                if isinstance(message, ToolMessage):
+                    stamp(message)
+        return result
 
     @override
     def wrap_tool_call(
@@ -133,7 +171,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
+        )
 
     @override
     async def awrap_tool_call(
@@ -149,7 +190,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
+        )
 
 
 def _build_runtime_middlewares(
@@ -158,11 +202,15 @@ def _build_runtime_middlewares(
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
     lazy_init: bool = True,
+    receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
@@ -180,9 +228,19 @@ def _build_runtime_middlewares(
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
         InputSanitizationMiddleware(),
+        KnowledgeScopeMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
     ]
+    if app_config.pii_redaction.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        # Listed last so it is the innermost Layer-1 wrapper: tool results are
+        # PII-redacted before ToolResultSanitizationMiddleware neutralizes tags
+        # and ToolOutputBudgetMiddleware externalizes oversized copies to disk
+        # (so those copies hold redacted text), and user messages reach it
+        # after the other request rewrites (issue #3190).
+        outer_wrappers.append(PiiRedactionMiddleware(app_config.pii_redaction))
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
@@ -192,7 +250,13 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
         thread_hooks.append(UploadsMiddleware())
-    thread_hooks.append(SandboxMiddleware(lazy_init=lazy_init))
+    thread_hooks.append(
+        SandboxMiddleware(
+            lazy_init=lazy_init,
+            available_skills=available_skills,
+            owns_agent_skill_projection=owns_agent_skill_projection,
+        )
+    )
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -201,6 +265,27 @@ def _build_runtime_middlewares(
 
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
+
+    # ToolReceiptMiddleware is the outermost wrap_tool_call layer: Guardrail,
+    # SandboxAudit, ReadBeforeWrite, and ToolProgress can all short-circuit a
+    # call with their own ToolMessage, and SandboxAudit rebuilds medium-risk
+    # results — an inner receipt layer would miss those results and silently
+    # gap the ledger. Stamping out here still sees deerflow_tool_meta on
+    # normal results (ToolErrorHandling stamps it on the inner return path)
+    # and on self-stamped short-circuit messages; the remainder fall back to
+    # message.status (see make_tool_receipt).
+    verification_config = app_config.verification
+    if verification_config.receipts_enabled:
+        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+
+        tail.append(ToolReceiptMiddleware(render_mode=receipts_render_mode))
+
+    # Resolve handles before any policy inspects arguments. Receipts enclose
+    # this layer too, so unknown-handle errors remain part of the ledger.
+    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+
+        tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
 
     # Authorization uses the existing GuardrailMiddleware so execution-time
     # deny, audit, and fail-closed handling stay in one proven implementation.
@@ -259,11 +344,13 @@ def _build_runtime_middlewares(
     # the model hasn't read in their current version.  It must sit outside ToolProgress
     # and ToolErrorHandling so that a blocked write returns immediately without consuming
     # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
-    # ToolMessage itself so downstream callers receive a well-formed result.
+    # ToolMessage itself so downstream callers receive a well-formed result, and its
+    # wrap_model_call elides the dead payload of blocked calls from model-bound
+    # requests (config-gated, state untouched).
     if app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
-        tail.append(ReadBeforeWriteMiddleware())
+        tail.append(ReadBeforeWriteMiddleware(config=app_config.read_before_write))
 
     # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
     # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
@@ -276,6 +363,18 @@ def _build_runtime_middlewares(
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+    # Artifact capture is a `before_model` hook that reads state messages, so
+    # its position in the tool-execution wrap chain is functionally irrelevant:
+    # it always sees the normalized results stored in state, and error results
+    # (status == "error") are skipped at extraction. It is appended after
+    # ToolErrorHandlingMiddleware purely for readability. It captures
+    # lightweight metadata only, so ToolOutputBudgetMiddleware truncating the
+    # content does not affect it. The configured cap (max_entries) is enforced
+    # inside the middleware when it emits updates; no assembly-time side effect.
+    if app_config.tool_artifacts.enabled:
+        from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+
+        tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -292,6 +391,8 @@ def build_lead_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     deferred_setup: "DeferredToolSetup | None" = None,
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -299,7 +400,12 @@ def build_lead_runtime_middlewares(
         include_uploads=True,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        # The lead renders the receipt ledger only while processing subagent
+        # results (default "delegation_only"); stamping stays always-on.
+        receipts_render_mode=app_config.verification.receipts_render_mode,
         authorization_provider=authorization_provider,
+        available_skills=available_skills,
+        owns_agent_skill_projection=owns_agent_skill_projection,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -323,13 +429,21 @@ def build_subagent_runtime_middlewares(
 
         app_config = get_app_config()
 
+    from deerflow.extensions import get_agent_build_extensions
+
+    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+
     middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,
         lazy_init=lazy_init,
+        # Subagent chains always render the ledger: citations are produced in
+        # the subagent context — no ledger, no citations, Layer 1 goes inert.
+        receipts_render_mode="always",
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        owns_agent_skill_projection=False,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
@@ -348,6 +462,10 @@ def build_subagent_runtime_middlewares(
             slash_source_owner_token=slash_source_owner_token,
         )
     )
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
     middlewares.append(
         SkillToolPolicyMiddleware(
             available_skills=available_skills,
@@ -457,6 +575,8 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            inject_tool_artifacts=app_config.tool_artifacts.enabled and app_config.tool_artifacts.inject_model_context,
+            pii_redaction_config=getattr(app_config, "pii_redaction", None),
         )
     )
 
@@ -497,37 +617,44 @@ def build_subagent_runtime_middlewares(
     summarization_middleware = create_summarization_middleware(
         app_config=app_config,
         skip_memory_flush=True,
+        archive_task_history=False,
         # The subagent's resolved model is the source of truth for null-model
         # summarization: the subagent context/configurable does not carry the child
         # model (it inherits the parent's), so passing it directly is what makes a
         # distinct-model subagent summarize with its own model, not the parent's.
         run_model_name=model_name,
+        extensions=resolved_extensions,
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # SystemMessageCoalescingMiddleware (#4040) — DurableContextMiddleware above
-    # inserts a second ``SystemMessage(authority_contract)`` after the leading
-    # system prompt (subagents carry their prompt as a leading ``SystemMessage``
-    # in ``messages``, not via ``create_agent(system_prompt=...)``). Two system
-    # messages — or a non-leading one — are exactly what the strict backends this
-    # targets (vLLM/SGLang/Qwen/Anthropic) reject, so the durable fix would trade
-    # #4039's assistant-first 400 for a duplicate-system 400. Mirror the lead
-    # chain: append the coalescer innermost so it merges every SystemMessage into
-    # one leading ``system_message`` on the outgoing request. It only rewrites the
-    # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
-    # inert to the Phase 2 guard-cap channel, and must sit inner of
-    # DurableContextMiddleware to observe the injected system message.
+    # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
+    # context before the first model call without registering the lead agent's
+    # DynamicContextMiddleware. The latter also reads user memory, performs a
+    # persisted ID swap, and handles midnight updates; none belongs in a one-shot
+    # subagent execution. This date-only reminder intentionally has no AppConfig
+    # or memory dependency.
+    from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
+
+    middlewares.append(SubagentDateContextMiddleware())
+
+    # SystemMessageCoalescingMiddleware (#4040, #4781) — DurableContextMiddleware
+    # above can insert ``SystemMessage(authority_contract)``, and the date-only
+    # middleware adds another hidden SystemMessage after the leading subagent
+    # prompt. Multiple or non-leading system messages are exactly what strict
+    # backends (vLLM/SGLang/Qwen/Anthropic) reject. Append the coalescer innermost
+    # so every SystemMessage becomes one leading ``system_message`` on the
+    # outgoing request. It only rewrites the per-request payload (no
+    # ``after_model``/``consume_stop_reason``), so it is inert to the Phase 2
+    # guard-cap channel and observes both durable authority and date context.
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
     from deerflow_extension_api import AgentScope
 
-    from deerflow.extensions import get_agent_build_extensions
     from deerflow.extensions.stack import compose_with_extensions
 
-    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
     if not resolved_extensions.has_middleware_contributors:
         return compose_with_extensions(middlewares, AgentScope.SUBAGENT, None, resolved_extensions)
 
